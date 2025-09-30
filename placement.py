@@ -302,38 +302,11 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
 def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     """Calculate loss to prevent cell overlaps.
 
-    TODO: IMPLEMENT THIS FUNCTION
-
-    This is the main challenge. You need to implement a differentiable loss function
-    that penalizes overlapping cells. The loss should:
-
-    1. Be zero when no cells overlap
-    2. Increase as overlap area increases
-    3. Use only differentiable PyTorch operations (no if statements on tensors)
-    4. Work efficiently with vectorized operations
-
-    HINTS:
-    - Two axis-aligned rectangles overlap if they overlap in BOTH x and y dimensions
-    - For rectangles centered at (x1, y1) and (x2, y2) with widths (w1, w2) and heights (h1, h2):
-      * x-overlap occurs when |x1 - x2| < (w1 + w2) / 2
-      * y-overlap occurs when |y1 - y2| < (h1 + h2) / 2
-    - Use torch.relu() to compute positive overlaps: overlap_x = relu((w1+w2)/2 - |x1-x2|)
-    - Overlap area = overlap_x * overlap_y
-    - Consider all pairs of cells: use broadcasting with unsqueeze
-    - Use torch.triu() to avoid counting each pair twice (only consider i < j)
-    - Normalize the loss appropriately (by number of pairs or total area)
-
-    RECOMMENDED APPROACH:
-    1. Extract positions, widths, heights from cell_features
-    2. Compute all pairwise distances using broadcasting:
-       positions_i = positions.unsqueeze(1)  # [N, 1, 2]
-       positions_j = positions.unsqueeze(0)  # [1, N, 2]
-       distances = positions_i - positions_j  # [N, N, 2]
-    3. Calculate minimum separation distances for each pair
-    4. Use relu to get positive overlap amounts
-    5. Multiply overlaps in x and y to get overlap areas
-    6. Mask to only consider upper triangle (i < j)
-    7. Sum and normalize
+    The loss:
+    1. Is zero when no cells overlap
+    2. Increases as overlap area increases
+    3. Uses only differentiable PyTorch operations (no if statements on tensors)
+    4. Works efficiently with vectorized operations
 
     Args:
         cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
@@ -341,9 +314,9 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
         edge_list: [E, 2] tensor with edges (not used here)
 
     Returns:
-        Scalar loss value (should be 0 when no overlaps exist)
+        Scalar loss value (0 when no overlaps exist)
     """
-    # Total numbre of cells
+    # Total number of cells
     N = cell_features.shape[0]
     
     # There is no overlap loss if there are no cells
@@ -369,10 +342,9 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     heights_i = heights.unsqueeze(1)
     heights_j = heights.unsqueeze(0)
 
-    margin = 0.5 # Keeping a small margin helps avoid residual micro-overlaps, where two cells are exactly touching
-
-    min_sep_x = (widths_i + widths_j) * 0.5 + margin   # [N,N]
-    min_sep_y = (heights_i + heights_j) * 0.5 + margin# [N,N]
+    # Minimum separation for non-overlap is just half-widths and half-heights, no fixed margin to reduce wirelength
+    min_sep_x = (widths_i + widths_j) * 0.5   # [N,N]
+    min_sep_y = (heights_i + heights_j) * 0.5 # [N,N]
 
     # Compute positive overlap amounts
     overlap_x = torch.relu(min_sep_x - dx)
@@ -385,110 +357,255 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     mask = torch.triu(torch.ones((N, N), dtype=torch.bool), diagonal=1)
     pair_overlap = overlap_area * mask
 
-    # # Normalize by total area so scale is independent of the number of cells
-    # total_area = cell_features[:, CellFeatureIdx.AREA].sum()
-    # eps = torch.finfo(overlap_area.dtype).eps
-    # loss = (pair_overlap ** 2).sum() / (total_area + eps)
-    # return loss
-
-    # Normalize by number of pairs (so scale is independent of the number of cells), and square the overlaps to give more weight to larger overlaps
-    return (pair_overlap ** 2).sum() / mask.sum()
+    # Using quadratic penalty with high coefficient for strong but stable repulsion, adding a linear term ensures even tiny overlaps contribute to the gradient
+    loss = (pair_overlap ** 2).sum() * 5.0 + pair_overlap.sum() * 20.0
+    return loss
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=2000,
-    lr=0.1,
+    num_epochs=1500,
+    lr=0.15,
     lambda_wirelength=1.0,
-    lambda_overlap=1000.0,
+    lambda_overlap=3000.0,
     verbose=True,
     log_interval=100,
 ):
-    """Train the placement optimization using gradient descent.
-
-    Args:
-        cell_features: [N, 6] tensor with cell properties
-        pin_features: [P, 7] tensor with pin properties
-        edge_list: [E, 2] tensor with edge connectivity
-        num_epochs: Number of optimization iterations
-        lr: Learning rate for Adam optimizer
-        lambda_wirelength: Weight for wirelength loss
-        lambda_overlap: Weight for overlap loss
-        verbose: Whether to print progress
-        log_interval: How often to print progress
-
-    Returns:
-        Dictionary with:
-            - final_cell_features: Optimized cell positions
-            - initial_cell_features: Original cell positions (for comparison)
-            - loss_history: Loss values over time
     """
-    # Clone features and create learnable positions
+    Two-phase training with adaptive scheduling:
+      - Phase A (legalize fast): heavy overlap weight, looser grad clip, larger LR
+      - Phase B (refine wirelength): reduce overlap weight, increase wirelength pressure,
+        cosine LR decay, add a temporary barycenter (graph-smoothing) helper loss.
+
+    Wirelength helpers (while keeping overlap==0):
+      - Curriculum on overlap weight (high -> medium -> low)
+      - Cosine LR decay to stabilize late-stage WL refinement
+      - Barycenter helper loss that pulls each cell toward the mean of its connected neighbors.
+        (This is a *shaping* term that helps WL; it is annealed to 0 later.)
+      - Reactive anti-overlap: if an overlap reappears, temporarily boost the overlap weight.
+
+    Notes found while testing:
+      - If overlap_repulsion_loss() contains a *fixed positive margin*, it can inflate WL.
+    """
+    import math
+    device, dtype = cell_features.device, cell_features.dtype
+
+    # --------- Clone & set learnable parameters (positions only) ----------
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
 
-    # Make only cell positions require gradients
+    # Learnable tensor: [N,2] (x,y)
     cell_positions = cell_features[:, 2:4].clone().detach()
     cell_positions.requires_grad_(True)
 
+    N = cell_features.shape[0] # number of cells
+    E = edge_list.shape[0] # number of edges
 
-    # Vary hyperparameters based on problem size
+    # --------- Build a light cell-graph for WL shaping (barycenter helper) ----------
+    # Map pins -> cells
+    pin_to_cell = pin_features[:, 0].long()  # [P]
+    # Edge list is pin-pin; convert to cell-cell and dedup/self-filter
+    if E > 0:
+        c_src = pin_to_cell[edge_list[:, 0]]  # [E]
+        c_tgt = pin_to_cell[edge_list[:, 1]]  # [E]
+        # keep only inter-cell edges
+        cc = torch.stack([c_src, c_tgt], dim=1)
+        cc = cc[c_src != c_tgt]
+        if cc.numel() > 0:
+            # make undirected (count multiplicity)
+            cc_sorted, _ = torch.sort(cc, dim=1)
+            cc_unique, counts = torch.unique(cc_sorted, dim=0, return_counts=True)
+        else:
+            cc_unique = torch.zeros((0, 2), dtype=torch.long, device=device)
+            counts = torch.zeros((0,), dtype=torch.long, device=device)
+    else:
+        cc_unique = torch.zeros((0, 2), dtype=torch.long, device=device)
+        counts = torch.zeros((0,), dtype=torch.long, device=device)
 
-    
+    # degree (weighted by multiplicity) for each cell
+    deg = torch.zeros((N,), dtype=dtype, device=device)
+    if cc_unique.numel() > 0:
+        i_idx = cc_unique[:, 0]
+        j_idx = cc_unique[:, 1]
+        w_ij = counts.to(dtype)
+        # undirected: add both directions to degree
+        deg.index_add_(0, i_idx, w_ij)
+        deg.index_add_(0, j_idx, w_ij)
 
-    # Create optimizer
-    optimizer = optim.Adam([cell_positions], lr=lr)
+    # Adaptive knobs by size of the design
+    # Bigger designs need stronger overlap pressure and higher LR early on.
+    lambda_overlap_base = float(lambda_overlap)
+    lambda_wirelength_base = float(lambda_wirelength)
+    learning_rate_initial = float(lr)
+    if N >= 1500:
+        learning_rate_initial = max(learning_rate_initial, 0.24)
+        lambda_overlap_base = max(lambda_overlap_base, 10000.0)
+        check_every_overlap = 5
+        num_epochs = min(num_epochs, 1200)
+    elif N >= 300:
+        learning_rate_initial = max(learning_rate_initial, 0.17)
+        lambda_overlap_base = max(lambda_overlap_base, 4000.0)
+        check_every_overlap = 7
+        num_epochs = min(num_epochs, 1200)
+    else:
+        check_every_overlap = 10
 
-    # Track loss history
-    loss_history = {
-        "total_loss": [],
-        "wirelength_loss": [],
-        "overlap_loss": [],
-    }
+    # --------- Optimizer ----------
+    optimizer = optim.Adam([cell_positions], lr=learning_rate_initial)
 
-    # Training loop
+    # Cosine LR schedule (manual)
+    def lr_at(t, T):
+        # Cosine from learning_rate_initial to learning_rate_initial*0.05 over T epochs
+        cosine = 0.5 * (1.0 + math.cos(math.pi * min(t, T) / max(T, 1)))
+        return learning_rate_initial * (0.05 + 0.95 * cosine)
+
+    # --------- Phase split ----------
+    # A: legalize (clear overlaps) fast; B: refine WL hard while guarding zero-overlap.
+    T_A = int(0.30 * num_epochs)   # ~30%
+    T_B = num_epochs - T_A
+
+    # Barycenter helper loss weight (annealed to 0 in late Phase B)
+    # Helps cells move toward the "graph centroid" of neighbors -> reduces WL faster.
+    beta_bary_init = 0.20
+    beta_bary_final = 0.0
+
+    # Tracking
+    loss_history = {"total_loss": [], "wirelength_loss": [], "overlap_loss": [], "bary_loss": []}
+    tri_mask = torch.triu(torch.ones((N, N), dtype=torch.bool, device=device), diagonal=1)
+
+    # Helper: compute fast "any-overlap?" boolean on current positions
+    def any_overlap(pos_xy):
+        xi = pos_xy[:, 0].unsqueeze(1); xj = pos_xy[:, 0].unsqueeze(0)
+        yi = pos_xy[:, 1].unsqueeze(1); yj = pos_xy[:, 1].unsqueeze(0)
+        dx = (xi - xj).abs(); dy = (yi - yj).abs()
+        w = cell_features[:, 4]; h = cell_features[:, 5]
+        wi = w.unsqueeze(1); wj = w.unsqueeze(0)
+        hi = h.unsqueeze(1); hj = h.unsqueeze(0)
+        min_sep_x = 0.5 * (wi + wj)
+        min_sep_y = 0.5 * (hi + hj)
+        overlap_bool = (min_sep_x - dx > 0) & (min_sep_y - dy > 0)
+        return overlap_bool[tri_mask].any()
+
+    # --------- Training loop ----------
     for epoch in range(num_epochs):
+        # Phase logic
+        in_phase_A = (epoch < T_A)
+        tB = max(0, epoch - T_A)  # time in Phase B
+
+        # Curriculum on overlap weight:
+        #   Phase A: super strong (x5 -> x2)
+        #   Phase B: gentle taper to allow better WL optimization
+        if in_phase_A:
+            # Smoothly go from 5x down to 2x in Phase A
+            frac = epoch / max(T_A, 1)
+            lambda_overlap = lambda_overlap_base * (5.0 - 3.0 * frac)   # 5.0 -> 2.0
+            lambda_wirelength = lambda_wirelength_base                           # WL weight stays at base in A
+        else:
+            # In Phase B, keep overlap weight constant to maintain zero overlaps
+            lambda_overlap = lambda_overlap_base * 1.5  # Keep high to guard overlaps
+            # Strongly increase WL pressure in B to improve packing efficiency
+            lambda_wirelength = lambda_wirelength_base * 3.5  # High WL focus
+
+        # Cosine decay LR across the *entire* run
+        for g in optimizer.param_groups:
+            g["lr"] = lr_at(epoch, num_epochs)
+
         optimizer.zero_grad()
 
-        # Create cell_features with current positions
+        # Current features with the live positions
         cell_features_current = cell_features.clone()
         cell_features_current[:, 2:4] = cell_positions
 
-        # Calculate losses
-        wl_loss = wirelength_attraction_loss(
-            cell_features_current, pin_features, edge_list
-        )
-        overlap_loss = overlap_repulsion_loss(
-            cell_features_current, pin_features, edge_list
-        )
+        # Core losses
+        wl_loss = wirelength_attraction_loss(cell_features_current, pin_features, edge_list)
+        ovl_loss = overlap_repulsion_loss(cell_features_current, pin_features, edge_list)
 
-        # Combined loss
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+        # Barycenter helper (graph-smoothing) — lowers WL gradients early
+        # Compute per-cell neighbor mean position, weighted by multiplicity.
+        if cc_unique.numel() > 0 and deg.max() > 0:
+            pos = cell_positions  # [N,2]
+            i_idx = cc_unique[:, 0]; j_idx = cc_unique[:, 1]
+            w_ij = counts.to(dtype).unsqueeze(1)  # [M,1]
 
-        # Backward pass
+            agg = torch.zeros_like(pos)  # sum of neighbor positions * weights
+            # add contributions both directions (undirected)
+            agg.index_add_(0, i_idx, w_ij * pos[j_idx])
+            agg.index_add_(0, j_idx, w_ij * pos[i_idx])
+
+            # avoid div-by-zero; only compute where deg>0
+            deg_safe = torch.clamp(deg, min=torch.finfo(dtype).eps).unsqueeze(1)
+            neigh_mean = agg / deg_safe  # [N,2]
+
+            # Per-cell squared distance to neighbor mean
+            bary_err = (pos - neigh_mean).pow(2).sum(dim=1)  # [N]
+            # Mask cells with deg=0 (no neighbors) out
+            bary_err = bary_err * (deg > 0).to(dtype)
+            bary_loss = bary_err.mean()
+        else:
+            bary_loss = torch.zeros((), dtype=dtype, device=device)
+
+        # Anneal barycenter helper to 0 over Phase B;
+        # keep it active in Phase A to accelerate WL improvement.
+        if in_phase_A:
+            beta_bary = beta_bary_init
+        else:
+            if T_B > 0:
+                fracB = tB / T_B
+            else:
+                fracB = 1.0
+            beta_bary = beta_bary_init + (beta_bary_final - beta_bary_init) * fracB  # → 0
+
+        total_loss = lambda_wirelength * wl_loss + lambda_overlap * ovl_loss + beta_bary * bary_loss
+
+        # Backprop
         total_loss.backward()
 
-        # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
+        # Grad clipping:
+        #   - Looser early to let cells separate fast
+        #   - Tighter later to avoid jitter and let WL settle
+        max_g = 80.0 if in_phase_A else 20.0
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=max_g)
 
-        # Update positions
         optimizer.step()
 
-        # Record losses
-        loss_history["total_loss"].append(total_loss.item())
-        loss_history["wirelength_loss"].append(wl_loss.item())
-        loss_history["overlap_loss"].append(overlap_loss.item())
+        # Reactive anti-overlap: if any overlap reappears in Phase B,
+        # temporarily boost overlap weight on the next step by nudging LR up a hair.
+        if not in_phase_A and (epoch % check_every_overlap == 0):
+            with torch.no_grad():
+                if any_overlap(cell_positions):
+                    # small "penalty kick": transient LR bump and implicit higher ovl via curriculum next iter
+                    for g in optimizer.param_groups:
+                        g["lr"] = max(g["lr"], learning_rate_initial * 0.2)
 
-        # Log progress
+        # Record
+        loss_history["total_loss"].append(float(total_loss.item()))
+        loss_history["wirelength_loss"].append(float(wl_loss.item()))
+        loss_history["overlap_loss"].append(float(ovl_loss.item()))
+        loss_history["bary_loss"].append(float(bary_loss.item()))
+
+        # Logging
         if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
-            print(f"Epoch {epoch}/{num_epochs}:")
-            print(f"  Total Loss: {total_loss.item():.6f}")
-            print(f"  Wirelength Loss: {wl_loss.item():.6f}")
-            print(f"  Overlap Loss: {overlap_loss.item():.6f}")
+            print(f"Epoch {epoch}/{num_epochs} | "
+                  f"LR {optimizer.param_groups[0]['lr']:.4f} | "
+                  f"λ_wl {lambda_wirelength:.2f} λ_ovl {lambda_overlap:.2f} β_bary {beta_bary:.3f} | "
+                  f"Total {total_loss.item():.6f}  WL {wl_loss.item():.6f}  "
+                  f"OVL {ovl_loss.item():.6f}  Bary {bary_loss.item():.6f}")
 
-    # Create final cell features
+        # Early exit for Phase A once *exact* overlaps are gone
+        if in_phase_A and (epoch % check_every_overlap == 0):
+            with torch.no_grad():
+                if not any_overlap(cell_positions):
+                    # Jump to Phase B start (keeps total epochs bound)
+                    # Optional: slightly lower LR to enter refinement smoothly
+                    for g in optimizer.param_groups:
+                        g["lr"] = lr_at(T_A, num_epochs)
+                    # Synthetically advance to just before Phase B
+                    epoch = T_A - 1  # loop will +1 to T_A next
+                    continue
+
+    # --------- Write back final positions ----------
     final_cell_features = cell_features.clone()
     final_cell_features[:, 2:4] = cell_positions.detach()
 
