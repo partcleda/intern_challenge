@@ -2,7 +2,7 @@
 
 Welcome to the par.tcl 2026 ML Sys intern challenge! Your task is to solve a placement problem involving standard cells (small blocks) and macros (large blocks). The **primary goal is to minimize overlap** between blocks. Wirelength is also evaluated, but **overlap is the dominant objective**. A valid placement must eventually ensure no blocks overlap, but we will judge solutions by how effectively you reduce overlap and, secondarily, how well you handle wirelength.
 
-The deadline is when all intern slots for summer 2026 are filled. We will review submissions every Saturday until all of our slots are filled. 
+The deadline is when all intern slots for summer 2026 are filled. We will review submissions on a rolling basis.
 
 ## Problem Statement
 
@@ -25,7 +25,7 @@ Also, if you think there are any bugs in the provided code, feel free to fix the
 
 You may submit multiple solutions to try and increase your score.
 
-We will review submissions every Saturday until all of our slots are filled. 
+We will review submissions on a rolling basis. 
 
 
 ## Leaderboard (sorted by overlap)
