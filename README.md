@@ -28,9 +28,10 @@ Also, if you think there are any bugs in the provided code, feel free to fix the
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
-| 2    | partcl example  | 0.8         | 0.4             | 5           | example              |
-| 3    | Add Yours!      |             |                 |             |                      |
+| 1    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
+| 2    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
+| 3    | partcl example  | 0.8         | 0.4             | 5           | example              |
+| 4    | Add Yours!      |             |                 |             |                      |
 
 > **To add your results:**  
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.

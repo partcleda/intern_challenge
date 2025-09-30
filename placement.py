@@ -41,8 +41,8 @@ BONUS CHALLENGES:
 import os
 from enum import IntEnum
 
-import torch
-import torch.optim as optim
+import torch  
+import torch.optim as optim  
 
 
 # Feature index enums for cleaner code access
@@ -299,75 +299,109 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
 
-def overlap_repulsion_loss(cell_features, pin_features, edge_list):
-    """Calculate loss to prevent cell overlaps.
-
-    TODO: IMPLEMENT THIS FUNCTION
-
-    This is the main challenge. You need to implement a differentiable loss function
-    that penalizes overlapping cells. The loss should:
-
-    1. Be zero when no cells overlap
-    2. Increase as overlap area increases
-    3. Use only differentiable PyTorch operations (no if statements on tensors)
-    4. Work efficiently with vectorized operations
-
-    HINTS:
-    - Two axis-aligned rectangles overlap if they overlap in BOTH x and y dimensions
-    - For rectangles centered at (x1, y1) and (x2, y2) with widths (w1, w2) and heights (h1, h2):
-      * x-overlap occurs when |x1 - x2| < (w1 + w2) / 2
-      * y-overlap occurs when |y1 - y2| < (h1 + h2) / 2
-    - Use torch.relu() to compute positive overlaps: overlap_x = relu((w1+w2)/2 - |x1-x2|)
-    - Overlap area = overlap_x * overlap_y
-    - Consider all pairs of cells: use broadcasting with unsqueeze
-    - Use torch.triu() to avoid counting each pair twice (only consider i < j)
-    - Normalize the loss appropriately (by number of pairs or total area)
-
-    RECOMMENDED APPROACH:
-    1. Extract positions, widths, heights from cell_features
-    2. Compute all pairwise distances using broadcasting:
-       positions_i = positions.unsqueeze(1)  # [N, 1, 2]
-       positions_j = positions.unsqueeze(0)  # [1, N, 2]
-       distances = positions_i - positions_j  # [N, N, 2]
-    3. Calculate minimum separation distances for each pair
-    4. Use relu to get positive overlap amounts
-    5. Multiply overlaps in x and y to get overlap areas
-    6. Mask to only consider upper triangle (i < j)
-    7. Sum and normalize
-
-    Args:
-        cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
-        pin_features: [P, 7] tensor with pin information (not used here)
-        edge_list: [E, 2] tensor with edges (not used here)
-
-    Returns:
-        Scalar loss value (should be 0 when no overlaps exist)
+def overlap_repulsion_loss(cell_feats, pin_feats, edges):
     """
-    N = cell_features.shape[0]
-    if N <= 1:
-        return torch.tensor(0.0, requires_grad=True)
+    Differentiable loss to push cells apart when they overlap.
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    Core idea:
+    - Each cell is a rectangle defined by (x, y, width, height).
+    - Two cells overlap if their centers are too close in both x and y.
+    - For every pair of cells, compute overlap area and penalize it.
+    - The larger the overlap, the stronger the penalty (cubic growth).
+    - Optimizer then uses gradients to move cells until overlaps disappear.
+    """
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    # Number of cells in the layout
+    n = cell_feats.shape[0]
+
+    # If there are no cells or just one, overlap is impossible → return 0
+    if n <= 1:
+        return torch.tensor(
+            0.0,
+            dtype=cell_feats.dtype,
+            device=cell_feats.device,
+            requires_grad=True,
+        )
+
+    # ----------------------------------------------------------------------
+    # 1. Extract geometry of all cells
+    # ----------------------------------------------------------------------
+    pos = cell_feats[:, 2:4]  # (x, y) coordinates of each cell center [N,2]
+    w   = cell_feats[:, 4]    # width of each cell [N]
+    h   = cell_feats[:, 5]    # height of each cell [N]
+
+    # ----------------------------------------------------------------------
+    # 2. Compute pairwise center-to-center distances (all vs all)
+    #    Using broadcasting: O(N^2) but fully vectorized on GPU/CPU
+    # ----------------------------------------------------------------------
+    pos_i = pos.unsqueeze(1)   # shape [N,1,2] → replicate across columns
+    pos_j = pos.unsqueeze(0)   # shape [1,N,2] → replicate across rows
+    diff  = pos_i - pos_j      # shape [N,N,2], difference between all pairs
+
+    dx = torch.abs(diff[:, :, 0])  # pairwise horizontal distance [N,N]
+    dy = torch.abs(diff[:, :, 1])  # pairwise vertical distance   [N,N]
+
+    # ----------------------------------------------------------------------
+    # 3. Compute required non-overlap spacing for each pair
+    #    Two cells do not overlap if:
+    #       dx >= (w_i + w_j)/2   and   dy >= (h_i + h_j)/2
+    #    Add a small clearance margin to stop "kissing" cells.
+    # ----------------------------------------------------------------------
+    w_i = w.unsqueeze(1)  # [N,1]
+    w_j = w.unsqueeze(0)  # [1,N]
+    h_i = h.unsqueeze(1)  # [N,1]
+    h_j = h.unsqueeze(0)  # [1,N]
+
+    margin = 0.1
+    need_x = (w_i + w_j) * 0.5 + margin   # required sep. along x [N,N]
+    need_y = (h_i + h_j) * 0.5 + margin   # required sep. along y [N,N]
+
+    # ----------------------------------------------------------------------
+    # 4. Measure how much cells intrude into each other
+    #    ReLU ensures no penalty if they are already separated enough.
+    # ----------------------------------------------------------------------
+    over_x = torch.relu(need_x - dx)  # positive only if overlap in x
+    over_y = torch.relu(need_y - dy)  # positive only if overlap in y
+
+    # Actual overlap area is product of x-intrusion and y-intrusion
+    over_area = over_x * over_y  # [N,N]
+
+    # ----------------------------------------------------------------------
+    # 5. Avoid double counting (i,j) and (j,i)
+    #    Keep only upper triangle of matrix, excluding diagonal.
+    # ----------------------------------------------------------------------
+    mask = torch.triu(
+        torch.ones((n, n), dtype=torch.bool, device=cell_feats.device),
+        diagonal=1,
+    )
+    over_pairs = over_area[mask]  # vector of all unique overlaps
+
+    # ----------------------------------------------------------------------
+    # 6. Apply strong penalty: cubic function
+    #    - Small overlaps get mild push
+    #    - Large overlaps explode in cost, forcing optimizer to separate them
+    # ----------------------------------------------------------------------
+    loss = (over_pairs ** 3).sum()
+
+    # Return final scalar loss
+    return loss
+
+# train_placement() tweaks:
+# - epochs 1000 to 2000: overlap needs longer to resolve
+# - lr 0.01 to 0.05: faster moves, cubic penalty benefits
+# - lambda_overlap 10 to 350 lambda_wirelength to 4.0
+# - grad clip 5 to 50: handle bigger gradients without choking
+# Net effect:  overlaps cleared, wires still optimize after
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
-    lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    num_epochs=2000,
+    lr=0.05,
+    lambda_wirelength=4.0,
+    lambda_overlap=350.0,
     verbose=True,
     log_interval=100,
 ):
@@ -431,7 +465,7 @@ def train_placement(
         total_loss.backward()
 
         # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=50.0)
 
         # Update positions
         optimizer.step()
@@ -730,14 +764,42 @@ def main():
         num_macros, num_std_cells
     )
 
-    # Initialize positions with random spread to reduce initial overlaps
-    total_cells = cell_features.shape[0]
-    spread_radius = 30.0
-    angles = torch.rand(total_cells) * 2 * 3.14159
-    radii = torch.rand(total_cells) * spread_radius
+    # ------------------------------------------------------------------
+    # NEW INIT STRATEGY vs OLD
+    #
+    # Old:
+    #   - Dropped cells randomly in a circle of radius=30
+    #   - Fast but clumped → lots of overlaps at start
+    #
+    # New:
+    #   - Spread radius scales with sqrt(total_area) → adapts to design size
+    #   - Place cells on a grid → even coverage of layout
+    #   - Add small jitter → avoids perfectly aligned rows/cols
+    #
+    # Net effect:
+    #   - Far fewer initial overlaps than old circular method
+    #   - Optimizer spends less time untangling collisions
+    #   - More stable start, especially for large designs
+    # ------------------------------------------------------------------
 
-    cell_features[:, 2] = radii * torch.cos(angles)
-    cell_features[:, 3] = radii * torch.sin(angles)
+    total_cells = cell_features.shape[0]
+    total_area = cell_features[:, 0].sum().item()
+    spread_radius = (total_area ** 0.5) * 1.5
+    grid_size = int(torch.ceil(torch.sqrt(torch.tensor(total_cells, dtype=torch.float))).item())
+
+    for i in range(total_cells):
+        row = i // grid_size
+        col = i % grid_size
+
+        base_x = (col - grid_size // 2) * spread_radius / grid_size
+        base_y = (row - grid_size // 2) * spread_radius / grid_size
+
+        offset_x = (torch.rand(1) - 0.5) * spread_radius / grid_size * 0.5
+        offset_y = (torch.rand(1) - 0.5) * spread_radius / grid_size * 0.5
+
+        cell_features[i, 2] = base_x + offset_x
+        cell_features[i, 3] = base_y + offset_y
+
 
     # Calculate initial metrics
     print("\n" + "=" * 70)
