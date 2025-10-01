@@ -32,7 +32,7 @@ We will review submissions on a rolling basis.
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      | unique solution (?)  |
+| 1    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      |  Spent my entire morning (12 am - 6 am) doing this :P       |
 | 2    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
 | 3    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
 | 4    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
