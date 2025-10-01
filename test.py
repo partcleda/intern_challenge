@@ -157,6 +157,8 @@ def run_all_tests():
         status = "✓ PASS" if result["num_cells_with_overlaps"] == 0 else "✗ FAIL"
         print(f"  Overlap Ratio: {result['overlap_ratio']:.4f} ({result['num_cells_with_overlaps']}/{result['total_cells']} cells)")
         print(f"  Normalized WL: {result['normalized_wl']:.4f}")
+        print(f"  Core Area: {result['core_area']:.2f}")   
+        print(f"  Core Util: {result['core_utilization']:.3f}")  
         print(f"  Time: {result['elapsed_time']:.2f}s")
         print(f"  Status: {status}")
         print()
