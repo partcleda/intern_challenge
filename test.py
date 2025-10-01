@@ -36,11 +36,11 @@ TEST_CASES = [
     (1, 2, 20, 1001),
     (2, 3, 25, 1002),
     (3, 2, 30, 1003),
-    # Medium designs
+    # # Medium designs
     (4, 3, 50, 1004),
     (5, 4, 75, 1005),
     (6, 5, 100, 1006),
-    # Large designs
+    # # Large designs
     (7, 5, 150, 1007),
     (8, 7, 150, 1008),
     (9, 8, 200, 1009),
@@ -93,7 +93,7 @@ def run_placement_test(
         cell_features,
         pin_features,
         edge_list,
-        verbose=False,  # Suppress per-epoch output
+        verbose=True,  # Suppress per-epoch output
     )
     elapsed_time = time.time() - start_time
 
