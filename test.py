@@ -88,17 +88,21 @@ def run_placement_test(
     cell_features[:, 3] = radii * torch.sin(angles)
 
     # Run optimization with default hyperparameters
+
+    DEVICE = torch.device("mps" if torch.mps.is_available() else "cpu")
+
     start_time = time.time()
     result = train_placement(
         cell_features,
         pin_features,
         edge_list,
-        verbose=False,  # Suppress per-epoch output
+        verbose=True,  # Suppress per-epoch output
     )
     elapsed_time = time.time() - start_time
 
     # Calculate final metrics using shared implementation
-    final_cell_features = result["final_cell_features"]
+    final_cell_features = result["final_cell_features"].cpu()
+    
     metrics = calculate_normalized_metrics(final_cell_features, pin_features, edge_list)
 
     return {

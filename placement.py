@@ -43,6 +43,10 @@ from enum import IntEnum
 
 import torch
 import torch.optim as optim
+import math
+
+DEVICE = torch.device("mps" if torch.mps.is_available() else "cpu")
+
 
 
 # Feature index enums for cleaner code access
@@ -346,30 +350,50 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     N = cell_features.shape[0]
     if N <= 1:
         return torch.tensor(0.0, requires_grad=True)
-
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
+    
     # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    # we create vector of N x (x, y, w, h)
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    cell_x = cell_features[:, 2]
+    cell_y = cell_features[:, 3]
+    cell_w = cell_features[:, 4]
+    cell_h = cell_features[:, 5]
+
+
+    # 2. Compute pairwise overlaps using vectorized operations
+    # we calculate overlap with overlap_x = relu((w1+w2)/2 - |x1-x2|)
+    # - Overlap area = overlap_x * overlap_y
+
+    overlap_x = torch.relu(
+        (torch.unsqueeze(cell_w, 1) + torch.unsqueeze(cell_w, 0)) / 2 - 
+        torch.abs(torch.unsqueeze(cell_x, 1) - torch.unsqueeze(cell_x, 0))
+    )
+
+
+    overlap_y = torch.relu(
+        (torch.unsqueeze(cell_h, 1) + torch.unsqueeze(cell_h, 0)) / 2 - 
+        torch.abs(torch.unsqueeze(cell_y, 1) - torch.unsqueeze(cell_y, 0))
+    )
+
+    overlap_area = torch.sum(torch.triu(overlap_x * overlap_y, diagonal=1))
+
+    # norm_overlap_area = overlap_area / torch.sum(cell_features[:, 0])
+    norm_overlap_area = overlap_area * (2 / (N * (N - 1)) + 0.8 * math.log10(N) / torch.sum(cell_features[:, 0]))
+    # normalizing by area reduces overlap as N goes up, so we can scale by logN
+
+    return norm_overlap_area
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
+    num_epochs=8_000,
+    lr=0.05, # base 0.01
     lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    lambda_overlap=1_000,
     verbose=True,
-    log_interval=100,
+    log_interval=200,
 ):
     """Train the placement optimization using gradient descent.
 
@@ -390,12 +414,16 @@ def train_placement(
             - initial_cell_features: Original cell positions (for comparison)
             - loss_history: Loss values over time
     """
-    # Clone features and create learnable positions
-    cell_features = cell_features.clone()
+
+    # move to GPU for acceleration
+    cell_features = cell_features.clone().to(DEVICE)
+    pin_features = pin_features.clone().to(DEVICE)
+    edge_list = edge_list.clone().to(DEVICE)
+
     initial_cell_features = cell_features.clone()
 
     # Make only cell positions require gradients
-    cell_positions = cell_features[:, 2:4].clone().detach()
+    cell_positions = cell_features[:, 2:4].clone().detach().to(DEVICE)
     cell_positions.requires_grad_(True)
 
     # Create optimizer
@@ -409,8 +437,17 @@ def train_placement(
     }
 
     # Training loop
+    # we implement 2 step training firstly prioritizing wirelength with exponential decay for wirelength weighting
+    # then we enter slower LR and constant low wirelength weight to focus on overlap
+
+    P_LAMBDA_DECAY = 0.5
+    P_LR_DECAY = 0.9
+
     for epoch in range(num_epochs):
         optimizer.zero_grad()
+        if epoch / num_epochs == P_LR_DECAY:
+            for param_group in optimizer.param_groups:
+                param_group["lr"] = 0.01
 
         # Create cell_features with current positions
         cell_features_current = cell_features.clone()
@@ -424,8 +461,17 @@ def train_placement(
             cell_features_current, pin_features, edge_list
         )
 
+        # we use exponentially decaying wirelength weight to push chips in most optimial position first, then ensure no overlap
+        l_start = 4
+        l_end = -2
+
+        if epoch / num_epochs < P_LAMBDA_DECAY:
+            exp_lambda_wirelength = 10 ** (l_start + (l_end - l_start) * (epoch / num_epochs / P_LAMBDA_DECAY))
+        else:
+            exp_lambda_wirelength = 10 ** l_end
+
         # Combined loss
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+        total_loss = exp_lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
 
         # Backward pass
         total_loss.backward()
@@ -548,9 +594,9 @@ def calculate_cells_with_overlaps(cell_features):
         return set()
 
     # Extract cell properties
-    positions = cell_features[:, 2:4].detach().numpy()
-    widths = cell_features[:, 4].detach().numpy()
-    heights = cell_features[:, 5].detach().numpy()
+    positions = cell_features[:, 2:4].detach().cpu().numpy()
+    widths = cell_features[:, 4].detach().cpu().numpy()
+    heights = cell_features[:, 5].detach().cpu().numpy()
 
     cells_with_overlaps = set()
 
@@ -760,6 +806,8 @@ def main():
         edge_list,
         verbose=True,
         log_interval=200,
+        lambda_overlap=1_000,  # 10 is base
+        num_epochs=50_000,  # 1_000 is default
     )
 
     # Calculate final metrics (both detailed and normalized)
@@ -814,3 +862,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
