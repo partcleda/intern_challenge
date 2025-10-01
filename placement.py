@@ -350,92 +350,153 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     if N <= 1:
         return torch.tensor(0.0, requires_grad=True)
 
-    position_features = cell_features[:, 2:4]
-    N = len(position_features)
+    position_features = cell_features[:, 2:4] # N x 2
+    N = len(position_features) # No. Cells
 
-    positions_i = position_features.unsqueeze(1)
-    positions_j = position_features.unsqueeze(0)
-    distances = positions_i - positions_j # N X N X 2
+    positions_i = position_features.unsqueeze(1) # N x 1 x 2
+    positions_j = position_features.unsqueeze(0) # 1 x N x 2
+    distances = positions_i - positions_j # N x N x 2 (broadcast)
 
-    size_features = cell_features[:, 4:]
-    sizes_i = size_features.unsqueeze(1)
-    sizes_j = size_features.unsqueeze(0)
-    size_means = (sizes_i + sizes_j) / 2.
+    size_features = cell_features[:, 4:] # N x 2
+    sizes_i = size_features.unsqueeze(1) # N x 1 x 2
+    sizes_j = size_features.unsqueeze(0) # 1 x N x 2
+    size_means = (sizes_i + sizes_j) / 2. # N x N x 2 (broadcast)
 
     # TODO: This can be tuned. (Increasing margin forces cells apart more aggressively)
-    margin = torch.tensor(4.0, requires_grad=True)
-    # 
+    # Potentially tune this based on the number of cells. The more cells there are the more aggresively we want to push them apart.
+    # Margin is used to push cells apart more / less aggresively. (minimum 0)
+    margin = torch.tensor(3.8, requires_grad=True)
+    # Let x_distance = (w1 + w2) / 2 - |x1 - x2| 
+    # Consider that x-overlap occurs when x_distance > 0
+    # This means that any negative distance indicates that two cells are -x_distance apart.
+    # Thus we have x_distance > -margin, where margin is how far apart we wish to push the cells in each dimension.
+    # This yields x_distance + margin > 0, which we can enforce using ReLU:
     overlaps = torch.relu(margin + size_means[:, :, :] - torch.abs(distances[:, :, :])) 
+    # Next we take the product of x overlaps and y overlaps to obtain the total overlap area. 
     overlap_total = torch.triu(overlaps[:, :, 0] * overlaps[:, :, 1], diagonal=1)
 
+    # For the final loss calculation I chose to square each individual overlap total to punish larger overlaps much more than smaller ones. Although this does have the consequence that overlaps < 1 are made even smaller, this seems to work better. 
+    # We also normalize by calculating the total number of pairs. 
+    # TODO: Check implications more robustly. 
     return torch.sum(torch.square(overlap_total)) / ((N - 1) * N / 2)
 
 def calculate_real_overlap(cell_features):
+    """Calculate how much cells actually overlap.
+
+    Args:
+        cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
+    
+    Returns:
+        Scalar value that is equal to the total overlapping area betweeen a cell pairs. 
+    """
+    # Do NOT use gradient. This function is used to evaluate model performance at each step. 
     with torch.no_grad():
         N = cell_features.shape[0]
         if N <= 1:
             return torch.tensor(0.0, requires_grad=False)
 
-        position_features = cell_features[:, 2:4]
-        N = len(position_features)
+        position_features = cell_features[:, 2:4] # N x 2
+        N = len(position_features) # No. Cells
 
-        positions_i = position_features.unsqueeze(1)
-        positions_j = position_features.unsqueeze(0)
-        distances = positions_i - positions_j # N X N X 2
+        positions_i = position_features.unsqueeze(1) # N x 1 x 2
+        positions_j = position_features.unsqueeze(0) # 1 x N x 2
+        distances = positions_i - positions_j # N x N x 2 (broadcast)
 
-        size_features = cell_features[:, 4:]
-        sizes_i = size_features.unsqueeze(1)
-        sizes_j = size_features.unsqueeze(0)
-        size_means = (sizes_i + sizes_j) / 2.
+        size_features = cell_features[:, 4:] # N x 2
+        sizes_i = size_features.unsqueeze(1) # N x 1 x 2
+        sizes_j = size_features.unsqueeze(0) # 1 x N x 2
+        size_means = (sizes_i + sizes_j) / 2. # N x N x 2 (broadcast)
 
+        # This does the same thing as overlap_repulsion_loss, except w/o margin. If (w1 + w2)/2 > abs(x1 - x2) they overlap. Remove negative values using ReLU.
         overlaps = torch.triu(torch.relu(size_means[:, :, :] - torch.abs(distances[:, :, :])) , diagonal=1)
+        # Multiply overlap_x by overlap_y to get total overlapping area
         overlap_total = overlaps[:, :, 0] * overlaps[:, :, 1]
+        # Return integer (NOT tensor) that represents the total overlapping area. 
         return torch.sum(overlap_total).item()
 
 
 # Implement a better initial placement strategy s.t. nothing overlaps:
-def initial_placement(cell_features, max_width_multiplier=2):
-    def first_fit_decreasing_height(cell_features, bin_width):
-        with torch.no_grad():
-            cells = cell_features.clone()
-            
-            # Sort rectangles by decreasing height
-            order = torch.argsort(-cells[:, 5])  # height is column 5
-            cells = cells[order]
+# https://www.csc.liv.ac.uk/~epa/surveyhtml.html (survey of rectangle packing strategies)
+# TODO: investigate other strategies to determine if they yield better performance.
+def first_fit_decreasing_height(cell_features, bin_width):
+    """Create a starting layout for cells using the First Fit Decreasing Height (FFDH) strategy.
 
-            # Placement variables
-            shelves = []  # list of dicts: {"y": baseline, "height": h, "used_width": w}
-            current_y = 0.0
-
-            for cell_id, rect in enumerate(cells):
-                w, h = rect[4].item(), rect[5].item()
-                placed = False
-
-                # Try to place in an existing shelf
-                for idx, shelf in enumerate(shelves):
-                    if shelf["used_width"] + w + 2 <= bin_width and h + 2 <= shelf["height"]:
-                        # Place rectangle in this shelf
-                        cells[cell_id][2] = shelf["used_width"] + w / 2 + 1  # x center
-                        cells[cell_id][3] = shelf["y"] + h / 2 + 1         # y center
-                        shelves[idx]["used_width"] = shelf["used_width"] + (w + 1)
-                        placed = True
-                        break
-
-                # If not placed, open a new shelf
-                if not placed:
-                    shelf = {"y": current_y, "height": h + 2, "used_width": w}
-                    cells[cell_id][2] = w / 2
-                    cells[cell_id][3] = current_y + h / 2 + 1
-                    shelves.append(shelf)
-                    shelves.append({"y": current_y + h + 2, "height": 4, "used_width": 0})
-                    current_y += (h + 6)
-
-            # Restore original order
-            placed_cells = torch.zeros_like(cells)
-            placed_cells[order] = cells
-            
-            return placed_cells
+    Args:
+        cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
+        bin_width: Scalar that represents the maximum width of each layer.
     
+    Returns:
+        [N, 6] tensor with [area, num_pins, x, y, width, height] where all overlaps have been eliminated.
+    """
+    # Do not use gradient since we are preparing the cell positions for training and thus we will not calculate loss here.
+    with torch.no_grad():
+        cells = cell_features.clone()
+        
+        # Sort rectangles by decreasing height
+        order = torch.argsort(-cells[:, 5])  # height is column 5
+        cells = cells[order]
+
+        # Placement variables
+        shelves = []  # list of dicts: {"y": baseline, "height": h, "used_width": w}
+        current_y = 0.0
+
+        # Padding is 2 multiplied by the margin in between blocks palced using this strategy. 
+        PADDING = 2
+        
+        # Small shelves are inserted between large shelves to ensure there is room for standard cells to be placed. This makes it so that standard cells do not all appear together and aids convergence.
+        SMALL_SHELF_HEIGHT = 4
+
+        # Iterate through cells in order of decreasing height
+        for cell_id, rect in enumerate(cells):
+            # Get width and height values so that we can work with numbers, not tensors. 
+            w, h = rect[4].item(), rect[5].item()
+            placed = False
+
+            # Try to place in an existing shelf
+            for idx, shelf in enumerate(shelves):
+                # Use padding to ensure that there are no overlaps. Checks if cell fits on the current shelf:
+                if shelf["used_width"] + w + PADDING <= bin_width and h + PADDING <= shelf["height"]:
+                    # Place the current cell on this shelf. 
+                    # Update x-coordinate of the cell.
+                    cells[cell_id][2] = shelf["used_width"] + w / 2 + PADDING // 2  # x center
+                    # Update y-coordinate of the cell.
+                    cells[cell_id][3] = shelf["y"] + h / 2 + PADDING // 2         # y center
+                    # Update current width of the shelf.
+                    shelves[idx]["used_width"] = shelf["used_width"] + (w + PADDING // 2)
+                    placed = True
+                    break
+
+            # If not placed, open a new shelf
+            if not placed:
+                # Open a new shelf with the height of the current cell + padding
+                shelf = {"y": current_y, "height": h + PADDING, "used_width": w}
+                # Place the current cell within the shelf:
+                cells[cell_id][2] = w / 2
+                cells[cell_id][3] = current_y + h / 2 + PADDING // 2
+                # Add the shelf:
+                shelves.append(shelf)
+                # Create a new small shelf to hold smaller cells. This aids convergence:
+                shelves.append({"y": current_y + h + PADDING, "height": SMALL_SHELF_HEIGHT, "used_width": 0})
+                # Increment y to ensure that the next shelf can be placed correctly.
+                current_y += (h + PADDING + SMALL_SHELF_HEIGHT)
+
+        # Restore original order
+        placed_cells = torch.zeros_like(cells)
+        placed_cells[order] = cells
+        
+        return placed_cells
+
+def get_initial_placement(cell_features, max_width_multiplier=2):
+    """Create a starting layout for cells using the First Fit Decreasing Height (FFDH) strategy.
+
+    Args:
+        cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
+        max_width_multiplier: The multiple of the widest cell that we set the maximum bin width to.
+    
+    Returns:
+        [N, 6] tensor with [area, num_pins, x, y, width, height] where all overlaps have been eliminated.
+    """
+    # Max width of each shelf. This is some multiple of the widest cell. 2 tends to work best by experimentation. 
     max_w = max_width_multiplier * torch.max(cell_features[:, 4])
     
     return first_fit_decreasing_height(cell_features, bin_width=max_w)
@@ -471,7 +532,8 @@ def train_placement(
             - loss_history: Loss values over time
     """
     # Clone features and create learnable positions
-    cell_features = initial_placement(cell_features.clone())
+    # Also updates the initial x, y positions of the cells to ensure that there are no overlaps using the first fit decreasing height strategy.
+    cell_features = get_initial_placement(cell_features.clone())
     initial_cell_features = cell_features.clone()
 
     # Make only cell positions require gradients
@@ -481,8 +543,10 @@ def train_placement(
     # Create optimizer
     optimizer = optim.Adam([cell_positions], lr=lr)
 
+    # This caches the best performing model so that we can return it at the end of training. This is important because training is a stochastic process and so overlap loss can fluctuate, however this allows us to ensure that the returned layout is guaranteed to have an overlap loss of 0.
     saved = (initial_cell_features[:, 2:4].clone().detach(), 100000)
 
+    # Cosine Annealing tends to work best. Minimum value of 0.05 obtained through experimentation. 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.05)
 
     # Track loss history
@@ -508,8 +572,11 @@ def train_placement(
             cell_features_current, pin_features, edge_list
         )
 
+        # We calculate how much the cells ACTUALLY overlap (not based on the loss)
         overlap_amount = calculate_real_overlap(cell_features)
+        # if there is no overlap, we save
         if overlap_amount == 0:
+            # But only if the wirelength loss is less than the last wirelength loss. 
             if wl_loss < saved[1]:
                 saved = (cell_features_current[:, 2:4].clone().detach(), wl_loss)
 
@@ -524,7 +591,8 @@ def train_placement(
 
         # Update positions
         optimizer.step()
-
+        
+        # Update LR
         scheduler.step()
 
         # Record losses
