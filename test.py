@@ -27,6 +27,7 @@ from placement import (
     calculate_normalized_metrics,
     generate_placement_input,
     train_placement,
+    plot_placement
 )
 
 
@@ -95,6 +96,7 @@ def run_placement_test(
         edge_list,
         verbose=False,  # Suppress per-epoch output
     )
+    plot_placement(result["initial_cell_features"], result["final_cell_features"], None, None, "placement_results/result_%s.png" % str(test_id))
     elapsed_time = time.time() - start_time
 
     # Calculate final metrics using shared implementation

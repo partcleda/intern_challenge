@@ -270,21 +270,33 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     cell_indices = pin_features[:, 0].long()
 
     # Calculate absolute pin positions
-    pin_absolute_x = cell_positions[cell_indices, 0] + pin_features[:, 1]
-    pin_absolute_y = cell_positions[cell_indices, 1] + pin_features[:, 2]
+    pin_x = pin_features[:, 1]
+    avg_x_dist = (cell_features[cell_indices, 4] - pin_x) / 2.0
+    pin_y = pin_features[:, 2]
+    avg_y_dist = (cell_features[cell_indices, 5] - pin_y) / 2.0
+    pin_absolute_x = cell_positions[cell_indices, 0] + pin_x
+    pin_absolute_y = cell_positions[cell_indices, 1] + pin_y
 
     # Get source and target pin positions for each edge
     src_pins = edge_list[:, 0].long()
     tgt_pins = edge_list[:, 1].long()
 
     src_x = pin_absolute_x[src_pins]
+    src_x_margin = avg_x_dist[src_pins]
     src_y = pin_absolute_y[src_pins]
+    src_y_margin = avg_y_dist[src_pins]
     tgt_x = pin_absolute_x[tgt_pins]
+    tgt_x_margin = avg_x_dist[tgt_pins]
     tgt_y = pin_absolute_y[tgt_pins]
+    tgt_y_margin = avg_y_dist[tgt_pins]
 
     # Calculate smooth approximation of Manhattan distance
     # Using log-sum-exp approximation for differentiability
     alpha = 0.1  # Smoothing parameter
+
+    # pin_x, pin_y (inside the cell)
+    #dx = torch.relu(torch.abs(src_x - tgt_x) - tgt_x_margin - src_x_margin)
+    #dy = torch.relu(torch.abs(src_y - tgt_y) - tgt_y_margin - src_y_margin)
     dx = torch.abs(src_x - tgt_x)
     dy = torch.abs(src_y - tgt_y)
 
@@ -297,7 +309,6 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     total_wirelength = torch.sum(smooth_manhattan)
 
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
-
 
 def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     """Calculate loss to prevent cell overlaps.
@@ -347,27 +358,111 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     if N <= 1:
         return torch.tensor(0.0, requires_grad=True)
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    position_features = cell_features[:, 2:4]
+    N = len(position_features)
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    positions_i = position_features.unsqueeze(1)
+    positions_j = position_features.unsqueeze(0)
+    distances = positions_i - positions_j # N X N X 2
+    #tri_dists = torch.triu(distances, diagonal=1) # Now everything below the diagonal is zero'd
 
+    size_features = cell_features[:, 4:]
+    sizes_i = size_features.unsqueeze(1)
+    sizes_j = size_features.unsqueeze(0)
+    size_means = (sizes_i + sizes_j) / 2.
+    #tri_sizes = torch.triu(size_means, diagonal=1)
+
+    margin = torch.tensor(2.0, requires_grad=True)
+    overlaps = torch.relu(margin + size_means[:, :, :] - torch.abs(distances[:, :, :])) 
+    #overlap_y = torch.relu(size_means[:, :, 1] - torch.abs(distances[:, :, 1])) 
+    overlap_total = torch.triu(overlaps[:, :, 0] * overlaps[:, :, 1], diagonal=1)
+
+    return torch.sum(torch.square(overlap_total)) / ((N - 1) * N / 2) #/ (overlap_total.count_nonzero() + 0.0000001)
+    #eturn torch.sum(overlap_total)
+
+def calculate_real_overlap(cell_features):
+    with torch.no_grad():
+        N = cell_features.shape[0]
+        if N <= 1:
+            return torch.tensor(0.0, requires_grad=False)
+
+        position_features = cell_features[:, 2:4]
+        N = len(position_features)
+
+        positions_i = position_features.unsqueeze(1)
+        positions_j = position_features.unsqueeze(0)
+        distances = positions_i - positions_j # N X N X 2
+        #tri_dists = torch.triu(distances, diagonal=1) # Now everything below the diagonal is zero'd
+
+        size_features = cell_features[:, 4:]
+        sizes_i = size_features.unsqueeze(1)
+        sizes_j = size_features.unsqueeze(0)
+        size_means = (sizes_i + sizes_j) / 2.
+        #tri_sizes = torch.triu(size_means, diagonal=1)
+
+        overlaps = torch.triu(torch.relu(size_means[:, :, :] - torch.abs(distances[:, :, :])) , diagonal=1)
+        overlap_total = overlaps[:, :, 0] * overlaps[:, :, 1]
+        return torch.sum(overlap_total).item()
+        #return torch.count_nonzero(overlap_total).item()
+
+
+# Implement a better initial placement strategy s.t. nothing overlaps:
+def initial_placement(cell_features):
+    def first_fit_decreasing_height(cell_features, bin_width):
+        with torch.no_grad():
+            cells = cell_features.clone()
+            
+            # Sort rectangles by decreasing height
+            order = torch.argsort(-cells[:, 5])  # height is column 5
+            cells = cells[order]
+
+            # Placement variables
+            shelves = []  # list of dicts: {"y": baseline, "height": h, "used_width": w}
+            current_y = 0.0
+
+            for cell_id, rect in enumerate(cells):
+                w, h = rect[4].item(), rect[5].item()
+                placed = False
+
+                # Try to place in an existing shelf
+                for idx, shelf in enumerate(shelves):
+                    if shelf["used_width"] + w + 2 <= bin_width and h + 2 <= shelf["height"]:
+                        # Place rectangle in this shelf
+                        cells[cell_id][2] = shelf["used_width"] + w / 2 + 1  # x center
+                        cells[cell_id][3] = shelf["y"] + h / 2 + 1         # y center
+                        shelves[idx]["used_width"] = shelf["used_width"] + (w + 1)
+                        placed = True
+                        break
+
+                # If not placed, open a new shelf
+                if not placed:
+                    shelf = {"y": current_y, "height": h + 2, "used_width": w}
+                    cells[cell_id][2] = w / 2
+                    cells[cell_id][3] = current_y + h / 2 + 1
+                    shelves.append(shelf)
+                    shelves.append({"y": current_y + h + 2, "height": 4, "used_width": 0})
+                    current_y += (h + 6)
+
+            total_height = current_y
+
+            # Restore original order
+            placed_cells = torch.zeros_like(cells)
+            placed_cells[order] = cells
+            
+            return placed_cells
+    
+    max_w = 2*torch.max(cell_features[:, 4])
+    
+    return first_fit_decreasing_height(cell_features, bin_width=max_w)
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
     num_epochs=1000,
-    lr=0.01,
+    lr=1.0,
     lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    lambda_overlap=20.0,
     verbose=True,
     log_interval=100,
 ):
@@ -391,15 +486,37 @@ def train_placement(
             - loss_history: Loss values over time
     """
     # Clone features and create learnable positions
-    cell_features = cell_features.clone()
+    cell_features = initial_placement(cell_features.clone())
     initial_cell_features = cell_features.clone()
 
     # Make only cell positions require gradients
     cell_positions = cell_features[:, 2:4].clone().detach()
     cell_positions.requires_grad_(True)
 
+    lr0 = lr * len(cell_features) / 50
+
     # Create optimizer
-    optimizer = optim.Adam([cell_positions], lr=lr)
+    optimizer = optim.Adam([cell_positions], lr=lr0)
+
+    saved = (initial_cell_features[:, 2:4].clone().detach(), 100000)
+
+    # LR Scheduler
+    # RMS Prop: loss = 0.4592
+    
+    #scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, num_epochs // 5)
+    # Cosine Warm: 0.4450
+
+    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.05)
+    # Cosine Annealing: 0.4422, eta_min = 0.01
+    # 0.4404, eta_min = 0.05
+    # 0.4467, eta_min
+
+    # TODO: Early stopping, new loss for wire length, scale lr0 based on number of learned parameters
+    # Try constant
+    #scheduler = torch.optim.lr_scheduler.Linea
+
+    #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=1000, factor=0.25)
 
     # Track loss history
     loss_history = {
@@ -407,6 +524,9 @@ def train_placement(
         "wirelength_loss": [],
         "overlap_loss": [],
     }
+
+    found_zero_o_loss = False
+    epochs_since_zero = 0
 
     # Training loop
     for epoch in range(num_epochs):
@@ -424,6 +544,39 @@ def train_placement(
             cell_features_current, pin_features, edge_list
         )
 
+        overlap_amount = calculate_real_overlap(cell_features)
+        if overlap_amount == 0:
+            lambda_wirelength = 1
+            lambda_overlap = 100
+            if wl_loss < saved[1]:
+                saved = (cell_positions.clone(), wl_loss)
+        else:
+            lambda_wirelength=0
+            lambda_overlap=1000
+
+        # try stopping if overlap_loss hasn't been zero in a while. this means that we likely won't find an optimal solution
+        # check first zero
+        """
+        epochs_since_zero += 1
+
+        if found_zero_o_loss:
+            #lambda_overlap = 1000*lambda_wirelength
+            if epochs_since_zero > 1000:
+                break
+"""
+
+            #optimizer = optim.Adam([cell_features], lr=lr0)
+        """
+        # Early Stopping Condition #2
+        if epoch > num_epochs // 10:
+            if found_zero_o_loss:
+                with torch.no_grad():
+                    last_100 = loss_history["wirelength_loss"][-100:]
+                    d_last_100 = [abs(last_100[i] - last_100[i+1]) for i in range(len(last_100) - 1)]
+                    if sum(d_last_100) / 100.0 < 0.005:
+                        break
+        """
+                
         # Combined loss
         total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
 
@@ -431,10 +584,19 @@ def train_placement(
         total_loss.backward()
 
         # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=1.0)
 
         # Update positions
         optimizer.step()
+
+
+        # Update LR
+        # Change LR Scheduler based on loss to improve convergence for large layouts?
+
+        # try changing which loss is used as the threshold 
+        #scheduler.step()
+        #scheduler.step(overlap_loss.detach())
+        # no scheduler loss = 0.4611
 
         # Record losses
         loss_history["total_loss"].append(total_loss.item())
@@ -450,7 +612,7 @@ def train_placement(
 
     # Create final cell features
     final_cell_features = cell_features.clone()
-    final_cell_features[:, 2:4] = cell_positions.detach()
+    final_cell_features[:, 2:4] = saved[0].detach()
 
     return {
         "final_cell_features": final_cell_features,
