@@ -282,21 +282,15 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     tgt_pins = edge_list[:, 1].long()
 
     src_x = pin_absolute_x[src_pins]
-    src_x_margin = avg_x_dist[src_pins]
     src_y = pin_absolute_y[src_pins]
-    src_y_margin = avg_y_dist[src_pins]
     tgt_x = pin_absolute_x[tgt_pins]
-    tgt_x_margin = avg_x_dist[tgt_pins]
     tgt_y = pin_absolute_y[tgt_pins]
-    tgt_y_margin = avg_y_dist[tgt_pins]
 
     # Calculate smooth approximation of Manhattan distance
     # Using log-sum-exp approximation for differentiability
     alpha = 0.1  # Smoothing parameter
 
     # pin_x, pin_y (inside the cell)
-    #dx = torch.relu(torch.abs(src_x - tgt_x) - tgt_x_margin - src_x_margin)
-    #dy = torch.relu(torch.abs(src_y - tgt_y) - tgt_y_margin - src_y_margin)
     dx = torch.abs(src_x - tgt_x)
     dy = torch.abs(src_y - tgt_y)
 
@@ -312,8 +306,6 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
 
 def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     """Calculate loss to prevent cell overlaps.
-
-    TODO: IMPLEMENT THIS FUNCTION
 
     This is the main challenge. You need to implement a differentiable loss function
     that penalizes overlapping cells. The loss should:
@@ -364,22 +356,19 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     positions_i = position_features.unsqueeze(1)
     positions_j = position_features.unsqueeze(0)
     distances = positions_i - positions_j # N X N X 2
-    #tri_dists = torch.triu(distances, diagonal=1) # Now everything below the diagonal is zero'd
 
     size_features = cell_features[:, 4:]
     sizes_i = size_features.unsqueeze(1)
     sizes_j = size_features.unsqueeze(0)
     size_means = (sizes_i + sizes_j) / 2.
-    #tri_sizes = torch.triu(size_means, diagonal=1)
 
     # TODO: This can be tuned. (Increasing margin forces cells apart more aggressively)
     margin = torch.tensor(4.0, requires_grad=True)
+    # 
     overlaps = torch.relu(margin + size_means[:, :, :] - torch.abs(distances[:, :, :])) 
-    #overlap_y = torch.relu(size_means[:, :, 1] - torch.abs(distances[:, :, 1])) 
     overlap_total = torch.triu(overlaps[:, :, 0] * overlaps[:, :, 1], diagonal=1)
 
-    return torch.sum(torch.square(overlap_total)) / ((N - 1) * N / 2) #/ (overlap_total.count_nonzero() + 0.0000001)
-    #eturn torch.sum(overlap_total)
+    return torch.sum(torch.square(overlap_total)) / ((N - 1) * N / 2)
 
 def calculate_real_overlap(cell_features):
     with torch.no_grad():
@@ -393,22 +382,19 @@ def calculate_real_overlap(cell_features):
         positions_i = position_features.unsqueeze(1)
         positions_j = position_features.unsqueeze(0)
         distances = positions_i - positions_j # N X N X 2
-        #tri_dists = torch.triu(distances, diagonal=1) # Now everything below the diagonal is zero'd
 
         size_features = cell_features[:, 4:]
         sizes_i = size_features.unsqueeze(1)
         sizes_j = size_features.unsqueeze(0)
         size_means = (sizes_i + sizes_j) / 2.
-        #tri_sizes = torch.triu(size_means, diagonal=1)
 
         overlaps = torch.triu(torch.relu(size_means[:, :, :] - torch.abs(distances[:, :, :])) , diagonal=1)
         overlap_total = overlaps[:, :, 0] * overlaps[:, :, 1]
         return torch.sum(overlap_total).item()
-        #return torch.count_nonzero(overlap_total).item()
 
 
 # Implement a better initial placement strategy s.t. nothing overlaps:
-def initial_placement(cell_features):
+def initial_placement(cell_features, max_width_multiplier=2):
     def first_fit_decreasing_height(cell_features, bin_width):
         with torch.no_grad():
             cells = cell_features.clone()
@@ -444,15 +430,13 @@ def initial_placement(cell_features):
                     shelves.append({"y": current_y + h + 2, "height": 4, "used_width": 0})
                     current_y += (h + 6)
 
-            total_height = current_y
-
             # Restore original order
             placed_cells = torch.zeros_like(cells)
             placed_cells[order] = cells
             
             return placed_cells
     
-    max_w = 2*torch.max(cell_features[:, 4])
+    max_w = max_width_multiplier * torch.max(cell_features[:, 4])
     
     return first_fit_decreasing_height(cell_features, bin_width=max_w)
 
@@ -494,30 +478,12 @@ def train_placement(
     cell_positions = cell_features[:, 2:4].clone().detach()
     cell_positions.requires_grad_(True)
 
-    lr0 = lr #* len(cell_features) / 50
-
     # Create optimizer
-    optimizer = optim.Adam([cell_positions], lr=lr0)
+    optimizer = optim.Adam([cell_positions], lr=lr)
 
     saved = (initial_cell_features[:, 2:4].clone().detach(), 100000)
 
-    # LR Scheduler
-    # RMS Prop: loss = 0.4592
-    
-    #scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
-    #scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, num_epochs // 5)
-    # Cosine Warm: 0.4450
-
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.05)
-    # Cosine Annealing: 0.4422, eta_min = 0.01
-    # 0.4404, eta_min = 0.05
-    # 0.4467, eta_min
-
-    # TODO: Early stopping, new loss for wire length, scale lr0 based on number of learned parameters
-    # Try constant
-    #scheduler = torch.optim.lr_scheduler.Linea
-
-    #scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=1000, factor=0.25)
 
     # Track loss history
     loss_history = {
@@ -525,9 +491,6 @@ def train_placement(
         "wirelength_loss": [],
         "overlap_loss": [],
     }
-
-    found_zero_o_loss = False
-    epochs_since_zero = 0
 
     # Training loop
     for epoch in range(num_epochs):
@@ -546,40 +509,10 @@ def train_placement(
         )
 
         overlap_amount = calculate_real_overlap(cell_features)
-        # REMOVE?
         if overlap_amount == 0:
-            #lambda_wirelength = 1
-            #lambda_overlap = 100
             if wl_loss < saved[1]:
                 saved = (cell_features_current[:, 2:4].clone().detach(), wl_loss)
-        else:
-            #lambda_wirelength=0
-            #lambda_overlap=1000
-            pass
 
-        # try stopping if overlap_loss hasn't been zero in a while. this means that we likely won't find an optimal solution
-        # check first zero
-        """
-        epochs_since_zero += 1
-
-        if found_zero_o_loss:
-            #lambda_overlap = 1000*lambda_wirelength
-            if epochs_since_zero > 1000:
-                break
-"""
-
-            #optimizer = optim.Adam([cell_features], lr=lr0)
-        """
-        # Early Stopping Condition #2
-        if epoch > num_epochs // 10:
-            if found_zero_o_loss:
-                with torch.no_grad():
-                    last_100 = loss_history["wirelength_loss"][-100:]
-                    d_last_100 = [abs(last_100[i] - last_100[i+1]) for i in range(len(last_100) - 1)]
-                    if sum(d_last_100) / 100.0 < 0.005:
-                        break
-        """
-                
         # Combined loss
         total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
 
@@ -592,14 +525,7 @@ def train_placement(
         # Update positions
         optimizer.step()
 
-
-        # Update LR
-        # Change LR Scheduler based on loss to improve convergence for large layouts?
-
-        # try changing which loss is used as the threshold 
         scheduler.step()
-        #scheduler.step(overlap_loss.detach())
-        # no scheduler loss = 0.4611
 
         # Record losses
         loss_history["total_loss"].append(total_loss.item())
