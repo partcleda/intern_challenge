@@ -343,6 +343,10 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     Returns:
         Scalar loss value (should be 0 when no overlaps exist)
     """
+    
+    
+    
+    
     N = cell_features.shape[0]
     if N <= 1:
         return torch.tensor(0.0, requires_grad=True)
@@ -351,23 +355,60 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     #
     # Your implementation should:
     # 1. Extract cell positions, widths, and heights
+    cell_positions = cell_features[:, 2:4]  # [N, 2] 
+    cell_width = cell_features[:,4 ] #[N, 1]
+    cell_heights = cell_features[:, 5] # [N, 1]
+
     # 2. Compute pairwise overlaps using vectorized operations
+    
+    #overlap x
+    x = cell_positions[:,0]
+    x1 = torch.unsqueeze(x, 0)
+    x2 =  torch.unsqueeze(x, 1)
+    w1 = torch.unsqueeze(cell_width, 0)
+    w2 = torch.unsqueeze(cell_width, 1)
+
+    x_dis = torch.abs(x1 - x2)
+    w_dis = (w1 + w2) / 2
+    overlap_x = torch.relu(w_dis - x_dis)
+    
+    #overlap y
+    y = cell_positions[:, 1]
+    y1 = torch.unsqueeze(y, 0)
+    y2 =  torch.unsqueeze(y, 1)
+    h1 = torch.unsqueeze(cell_heights, 0)
+    h2 = torch.unsqueeze(cell_heights, 1)
+
+    y_dis = torch.abs(y1 - y2)
+    h_dis = (h1 + h2)/ 2
+
+    overlap_y = torch.relu(h_dis - y_dis)
+    
+    
+    
+    overlap_area = torch.triu(overlap_x * overlap_y, 1)
     # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    #punishes overlapping area 
+    #easy to udnerstand and differentiable 
 
+    #classic loss function l1 loss
+    mae = torch.sum(torch.abs(overlap_area)) / overlap_area.shape[0]
+    
+    epsilon = 1e-6
+    exp_loss = torch.sum(torch.log1p(overlap_area) ** 2/ epsilon)
+    return exp_loss
+   
+    
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
-    lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    num_epochs=800,
+    lr=0.15,
+    lambda_wirelength=0.9,
+    lambda_overlap=20.0,
     verbose=True,
     log_interval=100,
 ):
