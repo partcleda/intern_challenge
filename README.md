@@ -33,11 +33,11 @@ We will review submissions on a rolling basis.
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
 | 1    | Ashmit Dutta    | 0.0000 | 0.2870 | 995.58   | adaptive hyperparameters/scheduler, two-phase constraint optimization problem + early stop
-| 1    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
-| 2    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
-| 3    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
-| 4    | partcl example  | 0.8         | 0.4             | 5           | example              |
-| 5    | Add Yours!      |             |                 |             |                      |
+| 2    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
+| 3    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
+| 4    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
+| 5    | partcl example  | 0.8         | 0.4             | 5           | example              |
+| 6    | Add Yours!      |             |                 |             |                      |
 
 > **To add your results:**  
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.
