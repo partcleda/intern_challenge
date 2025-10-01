@@ -32,6 +32,7 @@ We will review submissions on a rolling basis.
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
+| 1    | Ashmit Dutta    | 0.0000 | 0.2870 | 995.58   | adaptive hyperparameters/scheduler, two-phase constraint optimization problem + early stop
 | 1    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
 | 2    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
 | 3    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
