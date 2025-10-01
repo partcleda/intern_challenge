@@ -806,6 +806,8 @@ def main():
         print("✓ PASS: Overlap ratio is 0.0")
         print("\nCongratulations! Your implementation successfully eliminated all overlaps.")
         print(f"Your normalized wirelength: {normalized_metrics['normalized_wl']:.4f}")
+        print(f"Core Area: {normalized_metrics['core_area']:.2f}")
+        print(f"Core Utilization: {normalized_metrics['core_utilization']:.4f}")
     else:
         print("✗ FAIL: Overlaps still exist")
         print(f"  Need to eliminate overlaps in {normalized_metrics['num_cells_with_overlaps']} cells")
