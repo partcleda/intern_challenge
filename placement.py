@@ -372,7 +372,8 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     size_means = (sizes_i + sizes_j) / 2.
     #tri_sizes = torch.triu(size_means, diagonal=1)
 
-    margin = torch.tensor(2.0, requires_grad=True)
+    # TODO: This can be tuned. (Increasing margin forces cells apart more aggressively)
+    margin = torch.tensor(4.0, requires_grad=True)
     overlaps = torch.relu(margin + size_means[:, :, :] - torch.abs(distances[:, :, :])) 
     #overlap_y = torch.relu(size_means[:, :, 1] - torch.abs(distances[:, :, 1])) 
     overlap_total = torch.triu(overlaps[:, :, 0] * overlaps[:, :, 1], diagonal=1)
@@ -460,7 +461,7 @@ def train_placement(
     pin_features,
     edge_list,
     num_epochs=1000,
-    lr=1.0,
+    lr=0.5,
     lambda_wirelength=1.0,
     lambda_overlap=100.0,
     verbose=True,
@@ -493,7 +494,7 @@ def train_placement(
     cell_positions = cell_features[:, 2:4].clone().detach()
     cell_positions.requires_grad_(True)
 
-    lr0 = lr * len(cell_features) / 50
+    lr0 = lr #* len(cell_features) / 50
 
     # Create optimizer
     optimizer = optim.Adam([cell_positions], lr=lr0)
@@ -550,7 +551,7 @@ def train_placement(
             #lambda_wirelength = 1
             #lambda_overlap = 100
             if wl_loss < saved[1]:
-                saved = (cell_positions.clone(), wl_loss)
+                saved = (cell_features_current[:, 2:4].clone().detach(), wl_loss)
         else:
             #lambda_wirelength=0
             #lambda_overlap=1000
@@ -586,7 +587,7 @@ def train_placement(
         total_loss.backward()
 
         # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=1.0)
 
         # Update positions
         optimizer.step()
