@@ -302,8 +302,6 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
 def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     """Calculate loss to prevent cell overlaps.
 
-    TODO: IMPLEMENT THIS FUNCTION
-
     This is the main challenge. You need to implement a differentiable loss function
     that penalizes overlapping cells. The loss should:
 
@@ -343,31 +341,175 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     Returns:
         Scalar loss value (should be 0 when no overlaps exist)
     """
+    #N = cell_features.shape[0]
+    #if N <= 1:
+    #    return torch.tensor(0.0, requires_grad=True)
+
     N = cell_features.shape[0]
     if N <= 1:
-        return torch.tensor(0.0, requires_grad=True)
+        return torch.tensor(0.0, requires_grad=True, device=cell_features.device)
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    pos = cell_features[:, 2:4]  # (x, y)
+    w = cell_features[:, 4].unsqueeze(1)  # [N,1]
+    h = cell_features[:, 5].unsqueeze(1)  # [N,1]
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    dx = (pos[:, 0].unsqueeze(1) - pos[:, 0].unsqueeze(0)).abs()  # [N,N]
+    dy = (pos[:, 1].unsqueeze(1) - pos[:, 1].unsqueeze(0)).abs()  # [N,N]
 
+    # --- keep-out margin (1.03-1.08 are all reasonable) ---
+    margin_scale = 1.08
+
+    req_sep_x = margin_scale * (w + w.T) * 0.5
+    req_sep_y = margin_scale * (h + h.T) * 0.5
+
+    overlap_x = torch.relu(req_sep_x - dx)
+    overlap_y = torch.relu(req_sep_y - dy)
+    overlap_area = overlap_x * overlap_y  # [N,N]
+
+    tri_mask = torch.triu(torch.ones_like(overlap_area, dtype=torch.bool), diagonal=1)
+    pair_overlaps = overlap_area[tri_mask]
+
+    if pair_overlaps.numel() == 0:
+        return torch.tensor(0.0, requires_grad=True, device=cell_features.device)
+
+    # Normalize by average area to keep design-to-design scale stable.
+    avg_area = (w * h).mean().clamp(min=1e-6)
+    return ((pair_overlaps ** 2).mean()) / avg_area
+
+def legalize_small_overlaps(cell_features, max_iters=80, eps=1e-3):
+    """
+    Deterministic nudge to eliminate residual overlaps.
+    Pushes pairs apart by just-over-required along the axis of greater penetration.
+    """
+    import torch
+
+    pos = cell_features[:, 2:4]  # [N,2]
+    w = cell_features[:, 4]
+    h = cell_features[:, 5]
+    N = cell_features.shape[0]
+
+    for _ in range(max_iters):
+        moved = False
+        for i in range(N):
+            xi, yi, wi, hi = pos[i, 0], pos[i, 1], w[i], h[i]
+            for j in range(i+1, N):
+                xj, yj, wj, hj = pos[j, 0], pos[j, 1], w[j], h[j]
+                reqx = 0.5 * (wi + wj)
+                reqy = 0.5 * (hi + hj)
+                dx = abs(xi - xj)
+                dy = abs(yi - yj)
+                ox = reqx - dx
+                oy = reqy - dy
+                if ox > 0 and oy > 0:
+                    if ox >= oy:  # push in x
+                        shift = ox + eps
+                        if xi <= xj:
+                            pos[i, 0] -= 0.5 * shift
+                            pos[j, 0] += 0.5 * shift
+                        else:
+                            pos[i, 0] += 0.5 * shift
+                            pos[j, 0] -= 0.5 * shift
+                    else:         # push in y
+                        shift = oy + eps
+                        if yi <= yj:
+                            pos[i, 1] -= 0.5 * shift
+                            pos[j, 1] += 0.5 * shift
+                        else:
+                            pos[i, 1] += 0.5 * shift
+                            pos[j, 1] -= 0.5 * shift
+                    moved = True
+        if not moved:
+            break
+
+
+def legalize_small_overlaps_grid(cell_features, max_passes=5, iters_per_pass=3, eps=1e-3):
+    """
+    Spatial-hash legalizer: only resolve collisions among nearby cells.
+    Much faster than all-pairs for big N; eliminates residual overlaps deterministically.
+    """
+    import torch
+    pos = cell_features[:, 2:4]  # [N,2]
+    w = cell_features[:, 4]
+    h = cell_features[:, 5]
+    N = pos.shape[0]
+
+    # Grid cell size ~ average cell size (slightly > to catch neighbors)
+    gx = (w.mean() * 1.2).item()
+    gy = (h.mean() * 1.2).item()
+    if gx <= 0: gx = 1.0
+    if gy <= 0: gy = 1.0
+
+    def bins_for(i):
+        x, y = pos[i, 0].item(), pos[i, 1].item()
+        return int(x // gx), int(y // gy)
+
+    for _ in range(max_passes):
+        moved_any = False
+
+        # rebuild grid
+        grid = {}
+        for i in range(N):
+            bx, by = bins_for(i)
+            grid.setdefault((bx, by), []).append(i)
+
+        # check each cell against same and 8 neighboring bins
+        for _inner in range(iters_per_pass):
+            moved = False
+            for (bx, by), idxs in grid.items():
+                neighbor_bins = [(bx+dx, by+dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)]
+                neigh_idxs = []
+                for nb in neighbor_bins:
+                    neigh_idxs.extend(grid.get(nb, []))
+
+                neigh_set = list(set(neigh_idxs))
+                for i in idxs:
+                    xi, yi, wi, hi = pos[i, 0], pos[i, 1], w[i], h[i]
+                    for j in neigh_set:
+                        if j <= i:
+                            continue
+                        xj, yj, wj, hj = pos[j, 0], pos[j, 1], w[j], h[j]
+
+                        reqx = 0.5 * (wi + wj)
+                        reqy = 0.5 * (hi + hj)
+                        dx = torch.abs(xi - xj)
+                        dy = torch.abs(yi - yj)
+                        ox = (reqx - dx).item()
+                        oy = (reqy - dy).item()
+
+                        if ox > 0 and oy > 0:
+                            # Push along the larger penetration axis
+                            if ox >= oy:
+                                shift = ox + eps
+                                if xi <= xj:
+                                    pos[i, 0] -= 0.5 * shift
+                                    pos[j, 0] += 0.5 * shift
+                                else:
+                                    pos[i, 0] += 0.5 * shift
+                                    pos[j, 0] -= 0.5 * shift
+                            else:
+                                shift = oy + eps
+                                if yi <= yj:
+                                    pos[i, 1] -= 0.5 * shift
+                                    pos[j, 1] += 0.5 * shift
+                                else:
+                                    pos[i, 1] += 0.5 * shift
+                                    pos[j, 1] -= 0.5 * shift
+                            moved = True
+            moved_any |= moved
+            if not moved:
+                break
+
+        if not moved_any:
+            break
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
-    lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    num_epochs=4000,
+    lr=0.03,
+    lambda_wirelength=0.4,
+    lambda_overlap=300.0,
     verbose=True,
     log_interval=100,
 ):
@@ -390,6 +532,16 @@ def train_placement(
             - initial_cell_features: Original cell positions (for comparison)
             - loss_history: Loss values over time
     """
+
+    N = int(cell_features.shape[0])
+    # Mild size-aware boost (sqrt law) so bigger designs keep a strong "no-overlap" force
+    size_boost = max(1.0, (N / 80.0) ** 0.5)  # ~1 at N<=80, ~1.58 at N=200
+    lambda_overlap *= size_boost
+
+    # Optional: a few more epochs for big designs
+    if N >= 180 and num_epochs < 4500:
+        num_epochs = 4500
+
     # Clone features and create learnable positions
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
@@ -448,10 +600,26 @@ def train_placement(
             print(f"  Wirelength Loss: {wl_loss.item():.6f}")
             print(f"  Overlap Loss: {overlap_loss.item():.6f}")
 
-    # Create final cell features
+    # Create final cell features from learned positions
     final_cell_features = cell_features.clone()
     final_cell_features[:, 2:4] = cell_positions.detach()
 
+    # Now legalize the actual result we will evaluate/plot
+    with torch.no_grad():
+        # stronger grid legalizer: more passes and a slightly larger epsilon
+        for p in range(5):
+            legalize_small_overlaps_grid(
+                final_cell_features,
+                max_passes=4,
+                iters_per_pass=3,
+                eps=(1e-3 * (1 + p)) ** 1.25  # grows gently
+            )
+
+        # safety fallback: exact pairwise legalizer until ZERO overlaps or we hit a small cap
+        for _ in range(10):
+            if len(calculate_cells_with_overlaps(final_cell_features)) == 0:
+                break
+            legalize_small_overlaps(final_cell_features, max_iters=60, eps=1e-3)
     return {
         "final_cell_features": final_cell_features,
         "initial_cell_features": initial_cell_features,
