@@ -462,7 +462,7 @@ def train_placement(
     num_epochs=1000,
     lr=1.0,
     lambda_wirelength=1.0,
-    lambda_overlap=20.0,
+    lambda_overlap=100.0,
     verbose=True,
     log_interval=100,
 ):
@@ -507,7 +507,7 @@ def train_placement(
     #scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, num_epochs // 5)
     # Cosine Warm: 0.4450
 
-    #scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.05)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.05)
     # Cosine Annealing: 0.4422, eta_min = 0.01
     # 0.4404, eta_min = 0.05
     # 0.4467, eta_min
@@ -545,14 +545,16 @@ def train_placement(
         )
 
         overlap_amount = calculate_real_overlap(cell_features)
+        # REMOVE?
         if overlap_amount == 0:
-            lambda_wirelength = 1
-            lambda_overlap = 100
+            #lambda_wirelength = 1
+            #lambda_overlap = 100
             if wl_loss < saved[1]:
                 saved = (cell_positions.clone(), wl_loss)
         else:
-            lambda_wirelength=0
-            lambda_overlap=1000
+            #lambda_wirelength=0
+            #lambda_overlap=1000
+            pass
 
         # try stopping if overlap_loss hasn't been zero in a while. this means that we likely won't find an optimal solution
         # check first zero
@@ -584,7 +586,7 @@ def train_placement(
         total_loss.backward()
 
         # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
 
         # Update positions
         optimizer.step()
@@ -594,7 +596,7 @@ def train_placement(
         # Change LR Scheduler based on loss to improve convergence for large layouts?
 
         # try changing which loss is used as the threshold 
-        #scheduler.step()
+        scheduler.step()
         #scheduler.step(overlap_loss.detach())
         # no scheduler loss = 0.4611
 
