@@ -304,6 +304,7 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
 
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
+import math
 def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     """Calculate loss to prevent cell overlaps.
 
@@ -365,7 +366,8 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     # TODO: This can be tuned. (Increasing margin forces cells apart more aggressively)
     # Potentially tune this based on the number of cells. The more cells there are the more aggresively we want to push them apart.
     # Margin is used to push cells apart more / less aggresively. (minimum 0)
-    margin = torch.tensor(3.8, requires_grad=True)
+    # Try Log10(N)
+    margin = torch.tensor(1.2 * math.log10(N), requires_grad=True)
     # Let x_distance = (w1 + w2) / 2 - |x1 - x2| 
     # Consider that x-overlap occurs when x_distance > 0
     # This means that any negative distance indicates that two cells are -x_distance apart.
@@ -511,6 +513,7 @@ def train_placement(
     lambda_overlap=100.0,
     verbose=True,
     log_interval=100,
+    plot_prefix="placement_results/result_epoch_"
 ):
     """Train the placement optimization using gradient descent.
 
@@ -524,6 +527,7 @@ def train_placement(
         lambda_overlap: Weight for overlap loss
         verbose: Whether to print progress
         log_interval: How often to print progress
+        plot_prefix: Where to save layout plots to. If None then no plots are saved.
 
     Returns:
         Dictionary with:
@@ -545,6 +549,9 @@ def train_placement(
 
     # This caches the best performing model so that we can return it at the end of training. This is important because training is a stochastic process and so overlap loss can fluctuate, however this allows us to ensure that the returned layout is guaranteed to have an overlap loss of 0.
     saved = (initial_cell_features[:, 2:4].clone().detach(), 100000)
+
+    # Past layouts saves epoch: [N, 6] tensor of layouts during training process
+    past_layouts = {}
 
     # Cosine Annealing tends to work best. Minimum value of 0.05 obtained through experimentation. 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=0.05)
@@ -601,11 +608,20 @@ def train_placement(
         loss_history["overlap_loss"].append(overlap_loss.item())
 
         # Log progress
-        if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
-            print(f"Epoch {epoch}/{num_epochs}:")
-            print(f"  Total Loss: {total_loss.item():.6f}")
-            print(f"  Wirelength Loss: {wl_loss.item():.6f}")
-            print(f"  Overlap Loss: {overlap_loss.item():.6f}")
+        if epoch % log_interval == 0 or epoch == num_epochs - 1:
+            # Plot placement
+            if plot_prefix:
+                final_cell_features = cell_features.clone()
+                final_cell_features[:, 2:4] = saved[0].detach()
+                past_layouts[epoch] = final_cell_features
+                plot_placement(initial_cell_features, final_cell_features, None, None, filename=plot_prefix + "%s.png" % epoch)
+            # Print progress
+            if verbose:
+                print(f"Epoch {epoch}/{num_epochs}:")
+                print(f"  Total Loss: {total_loss.item():.6f}")
+                print(f"  Wirelength Loss: {wl_loss.item():.6f}")
+                print(f"  Overlap Loss: {overlap_loss.item():.6f}")
+        
 
     # Create final cell features
     final_cell_features = cell_features.clone()

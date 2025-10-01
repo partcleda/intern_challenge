@@ -3,5 +3,6 @@
 *.jpeg
 *.gif
 *.bmp
+placement_results/*
 
 **/__pycache__/**
