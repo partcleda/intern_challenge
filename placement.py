@@ -388,8 +388,8 @@ def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=8_000,
-    lr=0.05, # base 0.01
+    num_epochs=1_000,
+    lr=0.5, # base 0.01
     lambda_wirelength=1.0,
     lambda_overlap=1_000,
     verbose=True,
@@ -440,14 +440,14 @@ def train_placement(
     # we implement 2 step training firstly prioritizing wirelength with exponential decay for wirelength weighting
     # then we enter slower LR and constant low wirelength weight to focus on overlap
 
-    P_LAMBDA_DECAY = 0.5
-    P_LR_DECAY = 0.9
+    P_LAMBDA_DECAY = 0.8
+    P_LR_DECAY = 0.95
 
     for epoch in range(num_epochs):
         optimizer.zero_grad()
         if epoch / num_epochs == P_LR_DECAY:
             for param_group in optimizer.param_groups:
-                param_group["lr"] = 0.01
+                param_group["lr"] = 0.1
 
         # Create cell_features with current positions
         cell_features_current = cell_features.clone()
@@ -463,7 +463,7 @@ def train_placement(
 
         # we use exponentially decaying wirelength weight to push chips in most optimial position first, then ensure no overlap
         l_start = 4
-        l_end = -2
+        l_end = -3
 
         if epoch / num_epochs < P_LAMBDA_DECAY:
             exp_lambda_wirelength = 10 ** (l_start + (l_end - l_start) * (epoch / num_epochs / P_LAMBDA_DECAY))
