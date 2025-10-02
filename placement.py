@@ -448,15 +448,15 @@ def train_placement(
             print(f"  Wirelength Loss: {wl_loss.item():.6f}")
             print(f"  Overlap Loss: {overlap_loss.item():.6f}")
 
-        if epoch % 100 == 0 or epoch == num_epochs - 1:
-            filename = f"vis/{id_str}/placement_epoch_{epoch}_wl_{wl_loss.item():.4f}_ol_{overlap_loss.item():.4f}.png"
-            plot_placement(
-                initial_cell_features=initial_cell_features,
-                final_cell_features=cell_features_current,
-                pin_features=pin_features,
-                edge_list=edge_list,
-                filename=filename,
-            )
+        # if epoch % 100 == 0 or epoch == num_epochs - 1:
+        #     filename = f"vis/{id_str}/placement_epoch_{epoch}_wl_{wl_loss.item():.4f}_ol_{overlap_loss.item():.4f}.png"
+        #     plot_placement(
+        #         initial_cell_features=initial_cell_features,
+        #         final_cell_features=cell_features_current,
+        #         pin_features=pin_features,
+        #         edge_list=edge_list,
+        #         filename=filename,
+        #     )
         
 
     # Create final cell features

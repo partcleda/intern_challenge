@@ -32,16 +32,17 @@ We will review submissions on a rolling basis.
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    | Leison Gao      | 0.0000      | 0.2796          | 50.14s      |                      |
-| 2    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      |  Spent my entire morning (12 am - 6 am) doing this :P       |
-| 3    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |
-| 4    | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
-| 5    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
-| 6    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
-| 7    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
-| 8    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
-| 9    | partcl example  | 0.8         | 0.4             | 5           | example              |
-| 10    | Add Yours!      |             |                 |             |                      |
+| 1    | Brayden Rudisill      | 0.0000      | 0.2686          | 49.79       |  Timed on a mac air |
+| 2    | Leison Gao      | 0.0000      | 0.2796          | 50.14s      |                      |
+| 3    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      |  Spent my entire morning (12 am - 6 am) doing this :P       |
+| 4    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |
+| 5    | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
+| 6    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
+| 7    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
+| 8    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
+| 9    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
+| 10    | partcl example  | 0.8         | 0.4             | 5           | example              |
+| 11    | Add Yours!      |             |                 |             |                      |
 
 > **To add your results:**  
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.
