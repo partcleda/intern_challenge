@@ -326,19 +326,15 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch_progres
     min_sep_x = (w.unsqueeze(0) + w.unsqueeze(1)) / 2.0  # [N, N]
     min_sep_y = (h.unsqueeze(0) + h.unsqueeze(1)) / 2.0  # [N, N]
 
-    overlap_x = torch.nn.functional.softplus(min_sep_x - dx.abs(), beta=(20 * epoch_progress) + 0.2)
-    overlap_y = torch.nn.functional.softplus(min_sep_y - dy.abs(), beta=(20 * epoch_progress) + 0.2)
+    overlap_x = torch.nn.functional.softplus(min_sep_x - dx.abs(), beta=(4 * epoch_progress ** 2) + 0.1)
+    overlap_y = torch.nn.functional.softplus(min_sep_y - dy.abs(), beta=(4 * epoch_progress ** 2) + 0.1)
     
-    overlap_area = overlap_x * overlap_y ** 2
-
-    # Scale overlap by the area of the first box in each pair
-    # incentivizing large cells to get out of the way quickly
-    area_i = cell_features[:, 0].unsqueeze(1)  # [N, 1]
-    scaled_overlap = overlap_area * area_i  # [N, N]
+    overlap_area = (overlap_x * overlap_y) ** 2
 
     mask = 1.0 - torch.eye(N, device=cell_features.device)
+    
     # no point number normalization really needed honestly.
-    scaled_overlap = scaled_overlap * mask
+    scaled_overlap = overlap_area * mask
 
     return scaled_overlap.sum()
 
@@ -386,8 +382,7 @@ def train_placement(
 
     # Create optimizer
     optimizer = optim.Adam([cell_positions], lr=lr)
-    scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=100, gamma=0.6)
-    # optimizer = torch.optim.SGD([cell_positions], lr=2)
+
     # Track loss history
     loss_history = {
         "total_loss": [],
@@ -397,10 +392,20 @@ def train_placement(
 
     # Training loop
     for epoch in range(num_epochs):
-        if epoch < num_epochs / 5:
+        if epoch < num_epochs / 10:
             lambda_overlap = 0
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = 2.0  # High starting learning rate
+
+        elif epoch > 4 * num_epochs / 5:
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = 0.1  # Low ending learning rate
+                lambda_overlap = 12
         else:
-            lambda_overlap = 20
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = 0.5
+            lambda_overlap = 4 * (epoch / num_epochs) ** 10
+            
             
         optimizer.zero_grad()
 
@@ -427,10 +432,9 @@ def train_placement(
 
         # Update positions
         optimizer.step()
-        scheduler.step()
         
         # jitter the positions slightly to prevent getting stuck in local minima
-        cell_positions.data += torch.randn_like(cell_positions.data) * 0.01 * (1 - (epoch / num_epochs))
+        # cell_positions.data += torch.randn_like(cell_positions.data) * 0.01 * (1 - (epoch / num_epochs))
 
         # Record losses
         loss_history["total_loss"].append(total_loss.item())
