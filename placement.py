@@ -299,7 +299,7 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
 
-def overlap_repulsion_loss(cell_features, pin_features, edge_list):
+def overlap_repulsion_loss(cell_features, pin_features, edge_list, progress):
     """Calculate loss to prevent cell overlaps.
 
     TODO: IMPLEMENT THIS FUNCTION
@@ -347,29 +347,54 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     if N <= 1:
         return torch.tensor(0.0, requires_grad=True)
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    # Extracting cell positions, widths, and heights
+    positions = cell_features[:, 2:4]
+    widths = cell_features[:, 4]
+    heights = cell_features[:, 5]
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    # Computing pairwise differences
+    pos_i = positions.unsqueeze(1)  # [N, 1, 2]
+    pos_j = positions.unsqueeze(0)  # [1, N, 2]
+    delta_pos = (pos_i - pos_j)     # [N, N, 2]
+
+    # Calculating minimum separation distances
+    width_i = widths.unsqueeze(1)   # [N, 1]
+    width_j = widths.unsqueeze(0)   # [1, N]
+    height_i = heights.unsqueeze(1) # [N, 1]
+    height_j = heights.unsqueeze(0) # [1, N]
+
+    min_sep_x = (width_i + width_j) / 2     # [N, N]
+    min_sep_y = (height_i + height_j) / 2   # [N, N]
+    dist_x = torch.abs(delta_pos[:, :, 0])  # [N, N]
+    dist_y = torch.abs(delta_pos[:, :, 1])  # [N, N]
+
+    # Calculating overlaps using relu
+    overlap_x = torch.relu((min_sep_x - dist_x) + progress) # [N, N]
+    overlap_y = torch.relu((min_sep_y - dist_y) + progress) # [N, N]
+    overlap_area = overlap_x * overlap_y                    # [N, N]
+    
+    # Square the overlap for stronger penalty
+    overlap_penalty = overlap_area ** 2
+
+    # Mask to consider only upper triangle (i < j) and exclude self-overlap
+    mask = torch.triu(torch.ones((N, N), dtype=torch.float32, device=cell_features.device), diagonal=1)
+    overlap_penalty = overlap_penalty * mask  # [N, N]
+    total_overlap = torch.sum(overlap_penalty)
+
+    return total_overlap
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
+    num_epochs=2500,
+    lr=1.2,
     lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    lambda_overlap=250.0,
     verbose=True,
     log_interval=100,
+    filename=None
 ):
     """Train the placement optimization using gradient descent.
 
@@ -408,8 +433,40 @@ def train_placement(
         "overlap_loss": [],
     }
 
-    # Training loop
+    # Training loop with 4-stage approach
     for epoch in range(num_epochs):
+        # Calculate progress
+        progress = epoch / num_epochs
+        
+        # Stage 1 (0-10%): Pure wirelength optimization
+        if progress < 0.10:
+            current_lr = 1.6
+            current_lambda_overlap = 0.0
+        # Stage 2 (10-50%): Gradual overlap introduction
+        elif progress < 0.50:
+            current_lr = 1.0
+            # Exponential ramp-up of overlap penalty (0 -> 50)
+            stage_progress = (progress - 0.10) / 0.40  # 0 to 1 in this stage
+            current_lambda_overlap = 50.0 * (stage_progress ** 10)
+        # Stage 3 (50-75%): Moderate overlap enforcement
+        elif progress < 0.75:
+            current_lr = 0.6
+            # Continue ramping (50 -> 250)
+            stage_progress = (progress - 0.50) / 0.25  # 0 to 1 in this stage
+            current_lambda_overlap = 50.0 + 200.0 * (stage_progress ** 10)
+        # Stage 4 (75-90%): Almost final overlap elimination
+        elif progress < 0.90:
+            current_lr = 0.4
+            current_lambda_overlap = lambda_overlap
+        # Stage 5 (90-100%): Final fine-tuning
+        else:
+            current_lr = 0.2
+            current_lambda_overlap = lambda_overlap * 0.75
+        
+        # Update learning rate
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = current_lr
+        
         optimizer.zero_grad()
 
         # Create cell_features with current positions
@@ -421,11 +478,11 @@ def train_placement(
             cell_features_current, pin_features, edge_list
         )
         overlap_loss = overlap_repulsion_loss(
-            cell_features_current, pin_features, edge_list
+            cell_features_current, pin_features, edge_list, progress
         )
 
-        # Combined loss
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+        # Combined loss with dynamic overlap weight
+        total_loss = lambda_wirelength * wl_loss + current_lambda_overlap * overlap_loss
 
         # Backward pass
         total_loss.backward()
@@ -437,20 +494,43 @@ def train_placement(
         optimizer.step()
 
         # Record losses
-        loss_history["total_loss"].append(total_loss.item())
+        current_loss = total_loss.item()
+        loss_history["total_loss"].append(current_loss)
         loss_history["wirelength_loss"].append(wl_loss.item())
         loss_history["overlap_loss"].append(overlap_loss.item())
 
         # Log progress
         if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
-            print(f"Epoch {epoch}/{num_epochs}:")
-            print(f"  Total Loss: {total_loss.item():.6f}")
+            # Determine current stage for display
+            if progress < 0.10:
+                stage_name = "Stage 1 (WL Focus)"
+            elif progress < 0.50:
+                stage_name = "Stage 2 (Gradual)"
+            elif progress < 0.75:
+                stage_name = "Stage 3 (Moderate)"
+            elif progress < 0.90:
+                stage_name = "Stage 4 (Almost Final)"
+            else:
+                stage_name = "Stage 5 (Final Fine-tuning)"
+
+            print(f"Epoch {epoch + 1}/{num_epochs} - {stage_name} (LR: {current_lr:.2f}, lambda_overlap: {current_lambda_overlap:.1f}):")
+            print(f"  Total Loss: {current_loss:.6f}")
             print(f"  Wirelength Loss: {wl_loss.item():.6f}")
             print(f"  Overlap Loss: {overlap_loss.item():.6f}")
 
     # Create final cell features
     final_cell_features = cell_features.clone()
     final_cell_features[:, 2:4] = cell_positions.detach()
+
+    # Save final placement if filename provided
+    if filename:
+        plot_placement(
+            initial_cell_features,
+            final_cell_features,
+            pin_features,
+            edge_list,
+            filename            
+        )
 
     return {
         "final_cell_features": final_cell_features,

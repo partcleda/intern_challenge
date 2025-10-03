@@ -19,6 +19,7 @@ not to tune hyperparameters.
 """
 
 import time
+import os
 
 import torch
 
@@ -53,6 +54,7 @@ def run_placement_test(
     num_macros,
     num_std_cells,
     seed=None,
+    filename=None
 ):
     """Run placement optimization on a single test case.
 
@@ -94,6 +96,7 @@ def run_placement_test(
         pin_features,
         edge_list,
         verbose=False,  # Suppress per-epoch output
+        filename=filename
     )
     elapsed_time = time.time() - start_time
 
@@ -143,12 +146,17 @@ def run_all_tests():
         print(f"Test {idx}/{len(TEST_CASES)}: {size_category} ({num_macros} macros, {num_std_cells} std cells)")
         print(f"  Seed: {seed}")
 
+        # Create directory for results if it doesn't exist
+        if not os.path.exists('res'):
+            os.makedirs('res')
+
         # Run test
         result = run_placement_test(
             test_id,
             num_macros,
             num_std_cells,
             seed,
+            filename=f'res/placement_result_test{test_id}.png'
         )
 
         all_results.append(result)
