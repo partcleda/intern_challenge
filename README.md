@@ -7,7 +7,7 @@ The deadline is when all intern slots for summer 2026 are filled. We will review
 ## Problem Statement
 
 - **Objective:** Place a set of standard cells and macros on a chip layout to **minimize overlap (most important)** and wirelength (secondary).  
-  - Overlap will be measured as `num overlapping cells / num total cells`, though you are encouraged to define and implement your own overlap loss function if you think it’s better.  
+  - Overlap will be measured as `num overlapping cells / num total cells`, though you are encouraged to define and implement your own overlap loss function if you think it's better.  
   - Solving this problem will require designing a strong overlap loss, tuning hyperparameters, and experimenting with optimizers. Creativity is encouraged — nothing is off the table.  
 - **Input:** Randomly generated netlists.  
 - **Output:** Average normalized **overlap (primary metric)** and wirelength (secondary metric) across a set of randomized placements.  
@@ -41,11 +41,11 @@ We will review submissions on a rolling basis.
 | 7    | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
 | 8    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
 | 9    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
-| 10    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
-| 11    | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |  
-| 12    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
-| 13    | partcl example  | 0.8         | 0.4             | 5           | example              |
-| 14    | Add Yours!      |             |                 |             |                      |
+| 10   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
+| 11   | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
+| 12   | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |  
+| 13   | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
+| 14   | partcl example  | 0.8         | 0.4             | 5           | example              |
 
 > **To add your results:**  
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.

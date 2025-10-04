@@ -459,13 +459,13 @@ def generate_placement_input(num_macros, num_std_cells, seed=42):
     torch.manual_seed(seed)
     
     # Generate macro cells (large blocks)
-    macro_areas = torch.rand(num_macros) * (200 - 50) + 50
-    macro_widths = torch.sqrt(macro_areas * (torch.rand(num_macros) * (2.0 - 0.5) + 0.5))
+    macro_areas = torch.uniform(50, 200, (num_macros,))
+    macro_widths = torch.sqrt(macro_areas * torch.uniform(0.5, 2.0, (num_macros,)))
     macro_heights = macro_areas / macro_widths
     
     # Generate standard cells (small blocks)
-    std_areas = torch.rand(num_std_cells) * (10 - 1) + 1
-    std_widths = torch.sqrt(std_areas * (torch.rand(num_std_cells) * (1.2 - 0.8) + 0.8))
+    std_areas = torch.uniform(1, 10, (num_std_cells,))
+    std_widths = torch.sqrt(std_areas * torch.uniform(0.8, 1.2, (num_std_cells,)))
     std_heights = std_areas / std_widths
     
     # Combine all cells

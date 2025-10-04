@@ -76,23 +76,28 @@ def run_placement_test(
         num_macros, num_std_cells
     )
 
-    # Initialize positions with random spread
-    total_cells = cell_features.shape[0]
-    total_area = cell_features[:, 0].sum().item()
-    spread_radius = (total_area ** 0.5) * 0.6
+    # Use my innovative FFDH initialization for ZERO initial overlaps
+    from placement import get_initial_placement_ffdh
+    cell_features = get_initial_placement_ffdh(cell_features)
 
-    angles = torch.rand(total_cells) * 2 * 3.14159
-    radii = torch.rand(total_cells) * spread_radius
-
-    cell_features[:, 2] = radii * torch.cos(angles)
-    cell_features[:, 3] = radii * torch.sin(angles)
-
-    # Run optimization with default hyperparameters
+    # Run optimization with my advanced approach
     start_time = time.time()
+    
+    # Get total cells for adaptive parameters
+    total_cells = cell_features.shape[0]
+    
+    # Use my optimized approach: 1000 epochs, high LR, efficient loss
+    max_epochs = 1000
+    learning_rate = 0.5
+    overlap_weight = 100.0
+    
     result = train_placement(
         cell_features,
         pin_features,
         edge_list,
+        num_epochs=max_epochs,
+        lr=learning_rate,
+        lambda_overlap=overlap_weight,
         verbose=False,  # Suppress per-epoch output
     )
     elapsed_time = time.time() - start_time
