@@ -41,11 +41,11 @@ We will review submissions on a rolling basis.
 | 7    | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
 | 8    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
 | 9    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
-| 10    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
-| 11    | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |  
-| 12    | Vansh Jain      | 0.0038      | 1.0980          | 2139.50s    | Multi-component overlap loss, adaptive training, 9/10 perfect tests |
-| 13    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
-| 14    | partcl example  | 0.8         | 0.4             | 5           | example              |
+| 10   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
+| 11   | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
+| 12   | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |  
+| 13   | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
+| 14   | partcl example  | 0.8         | 0.4             | 5           | example              |
 
 > **To add your results:**  
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.

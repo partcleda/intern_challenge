@@ -76,63 +76,20 @@ def run_placement_test(
         num_macros, num_std_cells
     )
 
-    # Initialize positions with intelligent spread to minimize initial overlaps
-    total_cells = cell_features.shape[0]
-    total_area = cell_features[:, 0].sum().item()
-    
-    # Calculate optimal grid size with generous spacing
-    avg_cell_size = (total_area / total_cells) ** 0.5
-    grid_size = int(torch.ceil(torch.sqrt(torch.tensor(float(total_cells)))).item())
-    
-    # Calculate cell spacing to ensure no initial overlaps
-    cell_spacing = avg_cell_size * 2.5
-    
-    # Sort cells by size (largest first) for better packing
-    areas = cell_features[:, 0]
-    sorted_indices = torch.argsort(areas, descending=True)
-    
-    # Generate positions in a grid pattern with generous spacing
-    positions = torch.zeros(total_cells, 2)
-    for idx, cell_idx in enumerate(sorted_indices):
-        row = idx // grid_size
-        col = idx % grid_size
-        
-        # Base grid position with generous spacing
-        base_x = (col - grid_size/2) * cell_spacing
-        base_y = (row - grid_size/2) * cell_spacing
-        
-        # Add small random offset to break symmetry
-        offset_x = (torch.rand(1) - 0.5) * cell_spacing * 0.2
-        offset_y = (torch.rand(1) - 0.5) * cell_spacing * 0.2
-        
-        positions[cell_idx, 0] = base_x + offset_x.item()
-        positions[cell_idx, 1] = base_y + offset_y.item()
-    
-    cell_features[:, 2] = positions[:, 0]
-    cell_features[:, 3] = positions[:, 1]
+    # Use my innovative FFDH initialization for ZERO initial overlaps
+    from placement import get_initial_placement_ffdh
+    cell_features = get_initial_placement_ffdh(cell_features)
 
-    # Run optimization with adaptive hyperparameters based on problem size
+    # Run optimization with my advanced approach
     start_time = time.time()
     
-    # Scale epochs and learning rate based on problem size
-    if total_cells < 50:
-        max_epochs = 6000
-        learning_rate = 0.12
-        overlap_weight = 1500.0
-    elif total_cells < 150:
-        max_epochs = 10000
-        learning_rate = 0.10
-        overlap_weight = 2500.0
-    elif total_cells < 500:
-        # Large problems
-        max_epochs = 12000
-        learning_rate = 0.08
-        overlap_weight = 3000.0
-    else:
-        # NUCLEAR OPTION for 2000+ cells - ABSOLUTE ZERO!
-        max_epochs = 50000
-        learning_rate = 0.12
-        overlap_weight = 12000.0
+    # Get total cells for adaptive parameters
+    total_cells = cell_features.shape[0]
+    
+    # Use my optimized approach: 1000 epochs, high LR, efficient loss
+    max_epochs = 1000
+    learning_rate = 0.5
+    overlap_weight = 100.0
     
     result = train_placement(
         cell_features,
