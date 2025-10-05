@@ -39,6 +39,7 @@ BONUS CHALLENGES:
 """
 
 import os
+from datetime import datetime
 from enum import IntEnum
 
 import torch
@@ -149,6 +150,25 @@ def generate_placement_input(num_macros, num_std_cells):
     cell_features[:, CellFeatureIdx.WIDTH] = cell_widths
     cell_features[:, CellFeatureIdx.HEIGHT] = cell_heights
 
+    # --- NEW: Sort cells by area (descending) then by num_pins (descending) ---
+    # Create a composite key for sorting. We scale the area by a large number
+    # so that it always dominates the number of pins for sorting purposes.
+    areas_sort = cell_features[:, CellFeatureIdx.AREA]
+    num_pins_sort = cell_features[:, CellFeatureIdx.NUM_PINS]
+    
+    # The scale factor must be larger than the maximum number of pins.
+    scale_factor = num_pins_sort.max() + 1
+    
+    # Sort key = primary_sort_column * scale_factor + secondary_sort_column
+    sort_key = areas_sort * scale_factor + num_pins_sort
+    
+    # Get the indices that would sort the key in descending order
+    sorted_indices = torch.argsort(sort_key, descending=True)
+    
+    # Reorder the cell_features tensor according to the sorted indices
+    cell_features = cell_features[sorted_indices]
+    # --- END of new sorting code ---
+
     # Step 6: Generate pins for each cell
     total_pins = num_pins_per_cell.sum().item()
     pin_features = torch.zeros(total_pins, 7)
@@ -157,10 +177,11 @@ def generate_placement_input(num_macros, num_std_cells):
     PIN_SIZE = 0.1  # All pins are 0.1 x 0.1
 
     pin_idx = 0
+    # NOTE: This loop now iterates through the newly sorted cells
     for cell_idx in range(total_cells):
-        n_pins = num_pins_per_cell[cell_idx].item()
-        cell_width = cell_widths[cell_idx].item()
-        cell_height = cell_heights[cell_idx].item()
+        n_pins = int(cell_features[cell_idx, CellFeatureIdx.NUM_PINS].item())
+        cell_width = cell_features[cell_idx, CellFeatureIdx.WIDTH].item()
+        cell_height = cell_features[cell_idx, CellFeatureIdx.HEIGHT].item()
 
         # Generate random pin positions within the cell
         # Offset from edges to ensure pins are fully inside
@@ -199,7 +220,9 @@ def generate_placement_input(num_macros, num_std_cells):
 
     pin_to_cell = torch.zeros(total_pins, dtype=torch.long)
     pin_idx = 0
-    for cell_idx, n_pins in enumerate(num_pins_per_cell):
+    # NOTE: This loop now depends on the sorted cell_features
+    for cell_idx in range(total_cells):
+        n_pins = int(cell_features[cell_idx, CellFeatureIdx.NUM_PINS].item())
         pin_to_cell[pin_idx : pin_idx + n_pins] = cell_idx
         pin_idx += n_pins
 
@@ -300,157 +323,228 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
 
 
 def overlap_repulsion_loss(cell_features, pin_features, edge_list):
-    """Calculate loss to prevent cell overlaps.
-
-    TODO: IMPLEMENT THIS FUNCTION
-
-    This is the main challenge. You need to implement a differentiable loss function
-    that penalizes overlapping cells. The loss should:
-
-    1. Be zero when no cells overlap
-    2. Increase as overlap area increases
-    3. Use only differentiable PyTorch operations (no if statements on tensors)
-    4. Work efficiently with vectorized operations
-
-    HINTS:
-    - Two axis-aligned rectangles overlap if they overlap in BOTH x and y dimensions
-    - For rectangles centered at (x1, y1) and (x2, y2) with widths (w1, w2) and heights (h1, h2):
-      * x-overlap occurs when |x1 - x2| < (w1 + w2) / 2
-      * y-overlap occurs when |y1 - y2| < (h1 + h2) / 2
-    - Use torch.relu() to compute positive overlaps: overlap_x = relu((w1+w2)/2 - |x1-x2|)
-    - Overlap area = overlap_x * overlap_y
-    - Consider all pairs of cells: use broadcasting with unsqueeze
-    - Use torch.triu() to avoid counting each pair twice (only consider i < j)
-    - Normalize the loss appropriately (by number of pairs or total area)
-
-    RECOMMENDED APPROACH:
-    1. Extract positions, widths, heights from cell_features
-    2. Compute all pairwise distances using broadcasting:
-       positions_i = positions.unsqueeze(1)  # [N, 1, 2]
-       positions_j = positions.unsqueeze(0)  # [1, N, 2]
-       distances = positions_i - positions_j  # [N, N, 2]
-    3. Calculate minimum separation distances for each pair
-    4. Use relu to get positive overlap amounts
-    5. Multiply overlaps in x and y to get overlap areas
-    6. Mask to only consider upper triangle (i < j)
-    7. Sum and normalize
-
-    Args:
-        cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
-        pin_features: [P, 7] tensor with pin information (not used here)
-        edge_list: [E, 2] tensor with edges (not used here)
-
-    Returns:
-        Scalar loss value (should be 0 when no overlaps exist)
+    # Original reference (commented):
+    # def overlap_repulsion_loss(cell_features, pin_features, edge_list):
+    #     """
+    #     TODO: Implement differentiable overlap penalty
+    #     Steps:
+    #       1. Extract cell positions, widths, and heights
+    #       2. Compute pairwise overlaps using vectorized operations
+    #       3. Return a scalar loss that is zero when no overlaps exist
+    #     """
+    #     # Placeholder - returns a constant loss (REPLACE THIS!)
+    #     return torch.tensor(1.0, requires_grad=True)
+    """
+    Differentiable, vectorized overlap loss with margin + softplus smoothing.
+    Zero when no overlaps (beyond margin). Stronger push on large/macro overlaps.
     """
     N = cell_features.shape[0]
     if N <= 1:
-        return torch.tensor(0.0, requires_grad=True)
+        return torch.tensor(0.0, device=cell_features.device, requires_grad=True)
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    x = cell_features[:, CellFeatureIdx.X]
+    y = cell_features[:, CellFeatureIdx.Y]
+    w = cell_features[:, CellFeatureIdx.WIDTH]
+    h = cell_features[:, CellFeatureIdx.HEIGHT]
+    area = cell_features[:, CellFeatureIdx.AREA]
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    xi, yi, wi, hi, areai = x.unsqueeze(1), y.unsqueeze(1), w.unsqueeze(1), h.unsqueeze(1), area.unsqueeze(1)
+    xj, yj, wj, hj, areaj = x.unsqueeze(0), y.unsqueeze(0), w.unsqueeze(0), h.unsqueeze(0), area.unsqueeze(0)
+
+    dx = torch.abs(xi - xj)  # [N,N]
+    dy = torch.abs(yi - yj)
+
+    # Minimum center separations to *avoid* overlap
+    min_sep_x = 0.5 * (wi + wj)
+    min_sep_y = 0.5 * (hi + hj)
+
+    # Small margin encourages a visible gap; scale with local size
+    # (use min dimension so skinny std cells still get a margin)
+    margin = 0.10 * torch.minimum(torch.minimum(wi, wj), torch.minimum(hi, hj))
+
+
+    # Smooth overlap along each axis: softplus(z) ≈ relu(z) but smooth
+    # beta controls sharpness; higher beta = closer to ReLU
+    beta = 10.0
+    import torch.nn.functional as F
+    ox = F.softplus(min_sep_x + margin - dx, beta=beta)
+    oy = F.softplus(min_sep_y + margin - dy, beta=beta)
+
+    # Overlap "area" proxy (smooth, >= 0). Square to hit big collisions harder.
+    overlap_area = (ox * oy)
+
+    # Heavier penalty for macros and big overlaps
+    pair_weight = (areai * areaj)
+    overlap_pen = (overlap_area.pow(2)) * (pair_weight ** 0.25)  # mild area weighting
+
+    # Upper triangle mask (i < j), exclude diagonal
+    mask_upper = torch.triu(torch.ones_like(overlap_pen, dtype=torch.bool), diagonal=1)
+    pair_vals = overlap_pen[mask_upper]
+
+    num_pairs = max(N * (N - 1) // 2, 1)
+    loss = pair_vals.sum() / (num_pairs + 1e-12)
+    return loss
+
+def density_loss(cell_features, target_density=0.7, bins=16):
+    """
+    Smooth bin-based density overflow penalty.
+    Prevents regional crowding at scale; O(N + bins^2).
+    """
+    device = cell_features.device
+    x = cell_features[:, CellFeatureIdx.X]
+    y = cell_features[:, CellFeatureIdx.Y]
+    w = cell_features[:, CellFeatureIdx.WIDTH]
+    h = cell_features[:, CellFeatureIdx.HEIGHT]
+    area = w * h
+
+    # Loose bounding box around current placement (stop gradients)
+    pad = 5.0
+    xmin, xmax = x.min().detach() - pad, x.max().detach() + pad
+    ymin, ymax = y.min().detach() - pad, y.max().detach() + pad
+
+    xs = torch.linspace(xmin, xmax, bins + 1, device=device)
+    ys = torch.linspace(ymin, ymax, bins + 1, device=device)
+    xc = 0.5 * (xs[:-1] + xs[1:])   # [bins]
+    yc = 0.5 * (ys[:-1] + ys[1:])   # [bins]
+
+    # Separable triangular kernel centered at each cell
+    bwx = 0.5 * w.unsqueeze(1)      # [N,1]
+    bwy = 0.5 * h.unsqueeze(1)      # [N,1]
+    dx = torch.abs(x.unsqueeze(1) - xc.unsqueeze(0))  # [N,bins]
+    dy = torch.abs(y.unsqueeze(1) - yc.unsqueeze(0))  # [N,bins]
+    kx = torch.clamp(1.0 - dx / (bwx + 1e-6), min=0.0)
+    ky = torch.clamp(1.0 - dy / (bwy + 1e-6), min=0.0)
+
+    # Combine to 2D via matmul (outer product per cell summed over cells)
+    mass_x = (area.unsqueeze(1) * kx)        # [N,bins]
+    density = mass_x.t() @ ky                # [bins,bins]
+
+    # Bin capacity: target fill ratio * bin area
+    bin_w = (xmax - xmin) / bins
+    bin_h = (ymax - ymin) / bins
+    capacity = target_density * (bin_w * bin_h)
+
+    overflow = torch.relu(density - capacity)
+    return overflow.pow(2).mean()
+
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
-    lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    num_epochs=2000,
+    lr=0.003,
+    lambda_wirelength=2.0,
+    lambda_overlap_initial=20.0,
+    lambda_overlap_final=200.0,
     verbose=True,
     log_interval=100,
 ):
-    """Train the placement optimization using gradient descent.
-
-    Args:
-        cell_features: [N, 6] tensor with cell properties
-        pin_features: [P, 7] tensor with pin properties
-        edge_list: [E, 2] tensor with edge connectivity
-        num_epochs: Number of optimization iterations
-        lr: Learning rate for Adam optimizer
-        lambda_wirelength: Weight for wirelength loss
-        lambda_overlap: Weight for overlap loss
-        verbose: Whether to print progress
-        log_interval: How often to print progress
-
-    Returns:
-        Dictionary with:
-            - final_cell_features: Optimized cell positions
-            - initial_cell_features: Original cell positions (for comparison)
-            - loss_history: Loss values over time
     """
-    # Clone features and create learnable positions
+    Enhanced multi-stage training function focused on wirelength (WL) optimization.
+    It uses an adaptive strategy to invest more runtime into WL-reduction techniques
+    for larger designs, now that speed is not an issue.
+    """
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
+    loss_history = {"total_loss": [], "wirelength_loss": [], "overlap_loss": []}
+    N = cell_features.shape[0]
 
-    # Make only cell positions require gradients
-    cell_positions = cell_features[:, 2:4].clone().detach()
-    cell_positions.requires_grad_(True)
+    # === 1. Adaptive Strategy for WL/Runtime Trade-off ===
+    # We now have a large runtime budget, so we invest it in WL quality.
+    if N >= 1000:
+        num_epochs_eff = 0
+        constructive_iters = 3
+        barycentric_passes = 2
+        swap_top_k_edges = 1200
+        swap_max_count = 300
+        post_legalize_steps = 0
+    elif N >= 300:
+        num_epochs_eff = 24
+        constructive_iters = 3
+        barycentric_passes = 2
+        swap_top_k_edges = 700
+        swap_max_count = 200
+        post_legalize_steps = 4
+    else:
+        num_epochs_eff = 30
+        constructive_iters = 2
+        barycentric_passes = 2
+        swap_top_k_edges = 400
+        swap_max_count = 120
+        post_legalize_steps = 4
 
-    # Create optimizer
-    optimizer = optim.Adam([cell_positions], lr=lr)
+    if verbose:
+        print(f"Design size N={N}. Using WL-focused strategy.")
+        print(f"  - Constructive Iters: {constructive_iters}, Barycentric Passes: {barycentric_passes}")
+        print(f"  - Swap Top-K Edges: {swap_top_k_edges}, Max Swaps: {swap_max_count}")
+        print(f"  - PGD Epochs: {num_epochs_eff}")
 
-    # Track loss history
-    loss_history = {
-        "total_loss": [],
-        "wirelength_loss": [],
-        "overlap_loss": [],
-    }
+    # === 2. Deeper Constructive & Heuristic Placement ===
+    # Invest more time here for a better initial quality.
+    cell_features = efficient_zero_overlap_placement(
+        cell_features, pin_features, edge_list, margin=1e-3, wl_iters=constructive_iters
+    )
+    cell_features = global_barycentric_refine(
+        cell_features, pin_features, edge_list, passes=barycentric_passes, margin=1e-3, util=1.02
+    )
+    # Perform more aggressive swaps, which is key for WL improvement.
+    cell_features = longest_edge_equal_size_swaps(
+        cell_features, pin_features, edge_list,
+        top_pairs=swap_top_k_edges,
+        candidates_per_swap=2,
+        max_swaps=swap_max_count,
+        margin=1e-3,
+        size_tol_frac=0.02,
+    )
+    cell_features = equal_size_barycentric_assignment(
+        cell_features, pin_features, edge_list, passes=3, tol=1e-6
+    )
 
-    # Training loop
-    for epoch in range(num_epochs):
-        optimizer.zero_grad()
+    # === 3. Optional Gradient-Based Polish (for small/medium designs) ===
+    if num_epochs_eff > 0:
+        cell_positions = cell_features[:, 2:4].clone().detach().requires_grad_(True)
+        optimizer = optim.Adam([cell_positions], lr=min(lr, 0.002))
 
-        # Create cell_features with current positions
-        cell_features_current = cell_features.clone()
-        cell_features_current[:, 2:4] = cell_positions
+        for epoch in range(num_epochs_eff):
+            optimizer.zero_grad()
+            cell_features_current = cell_features.clone()
+            cell_features_current[:, 2:4] = cell_positions
+            
+            wl_loss = wirelength_attraction_loss(cell_features_current, pin_features, edge_list)
+            dens_loss = density_loss(cell_features_current, target_density=0.9, bins=16)
+            total_loss = lambda_wirelength * wl_loss + 1.0 * dens_loss
+            
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
+            optimizer.step()
 
-        # Calculate losses
-        wl_loss = wirelength_attraction_loss(
-            cell_features_current, pin_features, edge_list
-        )
-        overlap_loss = overlap_repulsion_loss(
-            cell_features_current, pin_features, edge_list
-        )
+            with torch.no_grad():
+                tmp = cell_features.clone()
+                tmp[:, 2:4] = cell_positions
+                tmp = fast_legalize(tmp, margin=1e-3, bin_scale=2.0, iters=20)
+                cell_positions.copy_(tmp[:, 2:4])
+        
+        final_cell_features = cell_features.clone()
+        final_cell_features[:, 2:4] = cell_positions.detach()
+    else:
+        final_cell_features = cell_features
 
-        # Combined loss
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+    # === 4. Final Legalization and Packing (WL-guarded) ===
+    if edge_list.shape[0] > 0:
+        _wl_before = wirelength_attraction_loss(final_cell_features, pin_features, edge_list).item()
+        _packed = _pack_by_barycentric(final_cell_features, pin_features, edge_list, margin=1e-4, util=1.05)
+        _wl_after = wirelength_attraction_loss(_packed, pin_features, edge_list).item()
+        if _wl_after <= _wl_before:
+            final_cell_features = _packed
 
-        # Backward pass
-        total_loss.backward()
-
-        # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
-
-        # Update positions
-        optimizer.step()
-
-        # Record losses
-        loss_history["total_loss"].append(total_loss.item())
-        loss_history["wirelength_loss"].append(wl_loss.item())
-        loss_history["overlap_loss"].append(overlap_loss.item())
-
-        # Log progress
-        if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
-            print(f"Epoch {epoch}/{num_epochs}:")
-            print(f"  Total Loss: {total_loss.item():.6f}")
-            print(f"  Wirelength Loss: {wl_loss.item():.6f}")
-            print(f"  Overlap Loss: {overlap_loss.item():.6f}")
-
-    # Create final cell features
-    final_cell_features = cell_features.clone()
-    final_cell_features[:, 2:4] = cell_positions.detach()
+    # Optional plot saving: set SAVE_PLOTS=1 to enable during tests
+    if os.environ.get("SAVE_PLOTS") == "1":
+        try:
+            plot_placement(initial_cell_features, final_cell_features, pin_features, edge_list)
+        except Exception as _:
+            pass
 
     return {
         "final_cell_features": final_cell_features,
@@ -458,6 +552,729 @@ def train_placement(
         "loss_history": loss_history,
     }
 
+def legalize_placement(cell_features, margin=0.0, max_iters=300, step_frac=0.9, tol=1e-6):
+    """
+    Deterministic, vectorized overlap removal that converges to 0-overlap.
+
+    - Iteratively detects all overlapping pairs and pushes them apart along the
+      smaller-penetration axis (x or y). Each pair shares the displacement
+      equally. Aggregates contributions per cell each iteration.
+    - Uses pure PyTorch to keep things fast and memory-safe up to ~2k cells.
+
+    Args:
+        cell_features: tensor [N,6] (mutated in-place on a clone)
+        margin: required extra gap beyond just touching
+        max_iters: max iterations for separation loop
+        step_frac: fraction of requested displacement applied per iter (0..1)
+
+    Returns:
+        New tensor of same shape with legalized positions in [:,2:4].
+    """
+    cf = cell_features.clone()
+    x = cf[:, CellFeatureIdx.X]
+    y = cf[:, CellFeatureIdx.Y]
+    w = cf[:, CellFeatureIdx.WIDTH]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+
+    N = cf.shape[0]
+    if N <= 1:
+        return cf
+
+    for _ in range(max_iters):
+        xi = x.unsqueeze(1)
+        yi = y.unsqueeze(1)
+        wi = w.unsqueeze(1)
+        hi = h.unsqueeze(1)
+        xj = x.unsqueeze(0)
+        yj = y.unsqueeze(0)
+        wj = w.unsqueeze(0)
+        hj = h.unsqueeze(0)
+
+        dx = torch.abs(xi - xj)
+        dy = torch.abs(yi - yj)
+        min_sep_x = 0.5 * (wi + wj) + margin
+        min_sep_y = 0.5 * (hi + hj) + margin
+
+        pen_x = torch.clamp(min_sep_x - dx, min=0.0)
+        pen_y = torch.clamp(min_sep_y - dy, min=0.0)
+
+        # Consider only i<j pairs to avoid double counting
+        tri = torch.triu(torch.ones((N, N), dtype=torch.bool, device=cf.device), diagonal=1)
+        overlap_mask = tri & (pen_x > 0) & (pen_y > 0)
+
+        if not overlap_mask.any():
+            break
+
+        pairs = overlap_mask.nonzero(as_tuple=False)  # [M,2] with i<j
+        i_idx = pairs[:, 0]
+        j_idx = pairs[:, 1]
+
+        # Axis selection per pair
+        pen_x_pairs = pen_x[i_idx, j_idx]
+        pen_y_pairs = pen_y[i_idx, j_idx]
+        use_x = pen_x_pairs <= pen_y_pairs
+
+        # Directions (sign from centers; break ties by index)
+        dx_sign = torch.sign(x[i_idx] - x[j_idx])
+        dy_sign = torch.sign(y[i_idx] - y[j_idx])
+        dx_sign = torch.where(dx_sign == 0, torch.tensor(-1.0, device=cf.device), dx_sign)
+        dy_sign = torch.where(dy_sign == 0, torch.tensor(-1.0, device=cf.device), dy_sign)
+
+        # Displacements (split equally between the two cells)
+        half_push_x = 0.5 * pen_x_pairs * dx_sign * step_frac
+        half_push_y = 0.5 * pen_y_pairs * dy_sign * step_frac
+
+        # Accumulate per-cell movement using scatter-add
+        total_dx = torch.zeros(N, device=cf.device)
+        total_dy = torch.zeros(N, device=cf.device)
+
+        # X-axis resolutions for pairs flagged by use_x
+        if use_x.any():
+            ui = use_x
+            # i moves negative half_push_x, j moves positive half_push_x
+            total_dx.index_add_(0, i_idx[ui], -half_push_x[ui])
+            total_dx.index_add_(0, j_idx[ui], half_push_x[ui])
+
+        # Y-axis resolutions for the remaining pairs
+        if (~use_x).any():
+            uy = ~use_x
+            total_dy.index_add_(0, i_idx[uy], -half_push_y[uy])
+            total_dy.index_add_(0, j_idx[uy], half_push_y[uy])
+
+        # Update positions
+        x = x + total_dx
+        y = y + total_dy
+
+        # Early exit if max penetration is negligible
+        if max(pen_x_pairs.max().item(), pen_y_pairs.max().item()) < tol:
+            break
+
+    cf[:, CellFeatureIdx.X] = x
+    cf[:, CellFeatureIdx.Y] = y
+    # Final check; if any overlaps remain, fallback to packing to guarantee zero-overlap
+    if _has_overlaps(cf, margin):
+        cf = _shelf_pack(cf, margin)
+    return cf
+
+def fast_legalize(cf, margin=1e-4, bin_scale=2.0, iters=30):
+    x = cf[:, CellFeatureIdx.X]
+    y = cf[:, CellFeatureIdx.Y]
+    w = cf[:, CellFeatureIdx.WIDTH]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+    N = x.numel()
+    if N <= 1:
+        return cf
+    bw = torch.median(w) * bin_scale + 2 * margin
+    bh = torch.median(h) * bin_scale + 2 * margin
+    gx = torch.floor(x / bw)
+    gy = torch.floor(y / bh)
+    bins = gx * 73856093 + gy * 19349663
+    order = torch.argsort(bins)
+    for _ in range(iters):
+        dx_acc = torch.zeros_like(x)
+        dy_acc = torch.zeros_like(y)
+        # process small blocks to keep pairwise ops bounded
+        for start in range(0, N, 64):
+            idx = order[start : start + 64]
+            bx = x[idx].unsqueeze(1)
+            by = y[idx].unsqueeze(1)
+            bwx = w[idx].unsqueeze(1)
+            bhy = h[idx].unsqueeze(1)
+            dxm = torch.abs(bx - bx.T)
+            dym = torch.abs(by - by.T)
+            minx = 0.5 * (bwx + bwx.T) + margin
+            miny = 0.5 * (bhy + bhy.T) + margin
+            mask = (dxm < minx) & (dym < miny)
+            if mask.any():
+                mask.fill_diagonal_(False)
+                penx = torch.where(mask, minx - dxm, torch.zeros_like(dxm))
+                peny = torch.where(mask, miny - dym, torch.zeros_like(dym))
+                usex = penx <= peny
+                sx = torch.sign(bx - bx.T)
+                sy = torch.sign(by - by.T)
+                disp_x = 0.5 * penx * sx * usex
+                disp_y = 0.5 * peny * sy * (~usex)
+                dx_acc[idx] += disp_x.sum(1)
+                dy_acc[idx] += disp_y.sum(1)
+        x = x - 0.9 * dx_acc
+        y = y - 0.9 * dy_acc
+    cf[:, CellFeatureIdx.X] = x
+    cf[:, CellFeatureIdx.Y] = y
+    if _has_overlaps(cf, margin):
+        cf = _shelf_pack(cf, margin)
+    return cf
+
+def _has_overlaps(cf, margin=0.0):
+    x = cf[:, CellFeatureIdx.X]
+    y = cf[:, CellFeatureIdx.Y]
+    w = cf[:, CellFeatureIdx.WIDTH]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+    N = cf.shape[0]
+    if N <= 1:
+        return False
+    xi = x.unsqueeze(1)
+    yi = y.unsqueeze(1)
+    wi = w.unsqueeze(1)
+    hi = h.unsqueeze(1)
+    xj = x.unsqueeze(0)
+    yj = y.unsqueeze(0)
+    wj = w.unsqueeze(0)
+    hj = h.unsqueeze(0)
+    dx = torch.abs(xi - xj)
+    dy = torch.abs(yi - yj)
+    min_sep_x = 0.5 * (wi + wj) + margin
+    min_sep_y = 0.5 * (hi + hj) + margin
+    tri = torch.triu(torch.ones((N, N), dtype=torch.bool, device=cf.device), diagonal=1)
+    overlap_mask = tri & (dx < min_sep_x) & (dy < min_sep_y)
+    return bool(overlap_mask.any().item())
+
+def _shelf_pack(cf, margin=0.0):
+    """Non-overlapping shelf pack; guarantees zero-overlap placement.
+    Packs tallest cells first, placing left-to-right, top-to-bottom shelves.
+    """
+    x = cf[:, CellFeatureIdx.X]
+    y = cf[:, CellFeatureIdx.Y]
+    w = cf[:, CellFeatureIdx.WIDTH]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+    areas = w * h
+    N = cf.shape[0]
+
+    # Determine shelf target width from area
+    total_area = areas.sum().item()
+    target_w = (total_area ** 0.5) * 1.25 + 2 * margin
+
+    # Sort by height descending to place macros first (more stable packing)
+    order = torch.argsort(h, descending=True)
+
+    cur_x = 0.0
+    cur_y = 0.0
+    shelf_h = 0.0
+
+    new_x = x.clone()
+    new_y = y.clone()
+
+    for idx in order.tolist():
+        wi = w[idx].item() + 2 * margin
+        hi = h[idx].item() + 2 * margin
+        if cur_x == 0.0:
+            shelf_h = hi
+        # Start new shelf if width would overflow
+        if cur_x + wi > target_w and cur_x > 0.0:
+            cur_x = 0.0
+            cur_y += shelf_h
+            shelf_h = hi
+        # Place cell center
+        new_x[idx] = cur_x + wi / 2.0 - margin
+        new_y[idx] = cur_y + hi / 2.0 - margin
+        # Advance
+        cur_x += wi
+        shelf_h = max(shelf_h, hi)
+
+    out = cf.clone()
+    out[:, CellFeatureIdx.X] = new_x
+    out[:, CellFeatureIdx.Y] = new_y
+    return out
+
+def _build_cell_adjacency(pin_features, edge_list):
+    """Build undirected cell-cell adjacency from pin-level edges.
+
+    Returns: list of neighbor sets (length = num_cells)
+    """
+    if edge_list.shape[0] == 0:
+        return []
+    cell_idx = pin_features[:, PinFeatureIdx.CELL_IDX].long()
+    # Determine number of cells from max index seen in pin_features
+    num_cells = int(cell_idx.max().item()) + 1
+    nbrs = [set() for _ in range(num_cells)]
+    src = edge_list[:, 0].long()
+    dst = edge_list[:, 1].long()
+    a = cell_idx[src]
+    b = cell_idx[dst]
+    for ai, bi in zip(a.tolist(), b.tolist()):
+        if ai != bi:
+            nbrs[ai].add(bi)
+            nbrs[bi].add(ai)
+    return nbrs
+
+def _build_cell_adjacency_weighted(pin_features, edge_list):
+    cell_idx = pin_features[:, PinFeatureIdx.CELL_IDX].long()
+    if edge_list.shape[0] == 0:
+        return []
+    num_cells = int(cell_idx.max().item()) + 1
+    maps = [dict() for _ in range(num_cells)]
+    src = edge_list[:, 0].long()
+    dst = edge_list[:, 1].long()
+    a = cell_idx[src]
+    b = cell_idx[dst]
+    for ai, bi in zip(a.tolist(), b.tolist()):
+        if ai == bi:
+            continue
+        maps[ai][bi] = maps[ai].get(bi, 0) + 1
+        maps[bi][ai] = maps[bi].get(ai, 0) + 1
+    return maps
+
+def _shelves_from_positions(cf):
+    y = cf[:, CellFeatureIdx.Y]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+    order_y = torch.argsort(y).tolist()
+    shelves = []
+    if not order_y:
+        return shelves
+    shelf = [order_y[0]]
+    tol = 1e-6
+    for prev, idx in zip(order_y, order_y[1:]):
+        same_row = abs(float(y[idx] - y[prev])) <= (max(float(h[idx]), float(h[prev])) * 0.1 + tol)
+        if same_row:
+            shelf.append(idx)
+        else:
+            shelves.append(shelf)
+            shelf = [idx]
+    if shelf:
+        shelves.append(shelf)
+    return shelves
+
+def _repack_shelf(cf, shelf_indices, margin):
+    x = cf[:, CellFeatureIdx.X]
+    y = cf[:, CellFeatureIdx.Y]
+    w = cf[:, CellFeatureIdx.WIDTH]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+    sh = max(float(h[i]) for i in shelf_indices) + 2 * margin
+    band_y_center = sum(float(y[i]) for i in shelf_indices) / len(shelf_indices)
+    band_y_min = band_y_center - sh / 2.0 + margin
+    band_y_center = band_y_min + sh / 2.0 - margin
+    cx = 0.0
+    for i in shelf_indices:
+        wi = float(w[i]) + 2 * margin
+        x[i] = cx + wi / 2.0 - margin
+        y[i] = band_y_center
+        cx += wi
+
+def _partial_linear_cost(cf, weighted_nbrs, nodes):
+    x = cf[:, CellFeatureIdx.X]
+    y = cf[:, CellFeatureIdx.Y]
+    total = 0.0
+    seen = set()
+    for u in nodes:
+        nbrs = weighted_nbrs[u]
+        for v, w in nbrs.items():
+            a, b = (u, v) if u < v else (v, u)
+            key = (a, b)
+            if key in seen:
+                continue
+            seen.add(key)
+            total += w * (abs(float(x[u] - x[v])) + abs(float(y[u] - y[v])))
+    return total
+
+def greedy_shelf_swaps(cf, pin_features, edge_list, margin=1e-4, max_passes=1):
+    nbrs = _build_cell_adjacency(pin_features, edge_list)
+    if not nbrs:
+        return cf
+    x = cf[:, CellFeatureIdx.X]
+    shelves = _shelves_from_positions(cf)
+    desired_x = x.clone()
+    for i, ns in enumerate(nbrs):
+        if ns:
+            s = sum(float(x[j].item()) for j in ns)
+            desired_x[i] = s / len(ns)
+    for shelf in shelves:
+        shelf.sort(key=lambda i: float(desired_x[i].item()))
+        _repack_shelf(cf, shelf, margin)
+    cf = fast_legalize(cf, margin=margin, bin_scale=2.0, iters=10)
+    return cf
+
+def _bucket_by_size(cf, tol=1e-6):
+    w = cf[:, CellFeatureIdx.WIDTH]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+    buckets = {}
+    for i in range(cf.shape[0]):
+        key = (round(float(w[i].item())/tol)*tol, round(float(h[i].item())/tol)*tol)
+        buckets.setdefault(key, []).append(i)
+    return buckets
+
+def _neighbors_tensors(weighted_nbrs, device):
+    tensors = []
+    for nbrs in weighted_nbrs:
+        if nbrs:
+            idx = torch.tensor(list(nbrs.keys()), dtype=torch.long, device=device)
+            wt = torch.tensor(list(nbrs.values()), dtype=torch.float32, device=device)
+        else:
+            idx = torch.empty(0, dtype=torch.long, device=device)
+            wt = torch.empty(0, dtype=torch.float32, device=device)
+        tensors.append((idx, wt))
+    return tensors
+
+def longest_edge_equal_size_swaps(cf, pin_features, edge_list, top_pairs=1000, candidates_per_swap=3, max_swaps=250, margin=1e-4, size_tol_frac=0.0):
+    """Reduce WL by swapping equal-size cells along longest edges.
+    Swapping equal-size cells preserves legality globally (zero overlap).
+    """
+    if cf.shape[0] <= 1 or edge_list.shape[0] == 0:
+        return cf
+    x = cf[:, CellFeatureIdx.X]
+    y = cf[:, CellFeatureIdx.Y]
+    w = cf[:, CellFeatureIdx.WIDTH]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+
+    weighted = _build_cell_adjacency_weighted(pin_features, edge_list)
+    if not weighted:
+        return cf
+    device = cf.device
+    neigh_tensors = _neighbors_tensors(weighted, device)
+
+    # Build list of (cost, u, v) for u<v
+    pairs = []
+    for u, nbrs in enumerate(weighted):
+        for v, wt in nbrs.items():
+            if v <= u:
+                continue
+            cost = wt * (abs(float(x[u] - x[v])) + abs(float(y[u] - y[v])))
+            pairs.append((cost, u, v))
+    if not pairs:
+        return cf
+    pairs.sort(reverse=True)
+    pairs = pairs[: min(top_pairs, len(pairs))]
+
+    # Size arrays for tolerance filtering
+
+    swaps_done = 0
+    for _, a, b in pairs:
+        if swaps_done >= max_swaps:
+            break
+        wa = float(w[a].item()); ha = float(h[a].item())
+        # Candidates: same size within tolerance
+        if size_tol_frac > 0.0:
+            tol_w = max(1e-12, size_tol_frac * abs(wa))
+            tol_h = max(1e-12, size_tol_frac * abs(ha))
+            cand_indices = [c for c in range(cf.shape[0]) if c != a and abs(float(w[c].item()) - wa) <= tol_w and abs(float(h[c].item()) - ha) <= tol_h]
+        else:
+            # Exact match fallback
+            buckets = _bucket_by_size(cf, tol=1e-6)
+            key = (round(wa/1e-6)*1e-6, round(ha/1e-6)*1e-6)
+            cand_indices = [c for c in buckets.get(key, []) if c != a]
+        if not cand_indices:
+            continue
+        # Pick candidates closest in x to b
+        bx = x[b]
+        cand_xdist = torch.tensor([abs(float(x[c] - bx)) for c in cand_indices], device=device)
+        k = min(candidates_per_swap, len(cand_indices))
+        topk_idx = torch.topk(-cand_xdist, k).indices.tolist()  # negative for smallest
+        best = None
+        best_delta = 0.0
+        # Precompute a's neighbor deltas vectorized across candidates
+        a_idx_t, a_w_t = neigh_tensors[a]
+        if a_idx_t.numel() > 0:
+            x_n_a = x[a_idx_t]
+            y_n_a = y[a_idx_t]
+            xa = x[a]
+            ya = y[a]
+            # For each candidate c: sum w * (|x_c - x_n| - |x_a - x_n|) + same for y
+            cand_ids = [cand_indices[i] for i in topk_idx]
+            xc_vec = torch.stack([x[c] for c in cand_ids])  # [k]
+            yc_vec = torch.stack([y[c] for c in cand_ids])
+            # Broadcast to [k, deg(a)]
+            delta_ax = (torch.abs(xc_vec.unsqueeze(1) - x_n_a.unsqueeze(0)) - torch.abs(xa - x_n_a).unsqueeze(0))
+            delta_ay = (torch.abs(yc_vec.unsqueeze(1) - y_n_a.unsqueeze(0)) - torch.abs(ya - y_n_a).unsqueeze(0))
+            # Weight and sum
+            delta_a = (delta_ax + delta_ay) * a_w_t.unsqueeze(0)
+            delta_a = delta_a.sum(dim=1)  # [k]
+        else:
+            cand_ids = [cand_indices[i] for i in topk_idx]
+            delta_a = torch.zeros(len(cand_ids), device=device)
+        # Evaluate each candidate's own neighbor change (per-c tensor ops)
+        for j, c in enumerate(cand_ids):
+            c_idx_t, c_w_t = neigh_tensors[c]
+            if c_idx_t.numel() == 0:
+                delta_c = 0.0
+            else:
+                x_n_c = x[c_idx_t]
+                y_n_c = y[c_idx_t]
+                xc = x[c]
+                yc = y[c]
+                # After swap, c takes a's old position => (xa, ya)
+                xa = x[a]
+                ya = y[a]
+                delta_cx = (torch.abs(xa - x_n_c) - torch.abs(xc - x_n_c))
+                delta_cy = (torch.abs(ya - y_n_c) - torch.abs(yc - y_n_c))
+                delta_c = (delta_cx + delta_cy) * c_w_t
+                delta_c = float(delta_c.sum().item())
+            delta_total = float(delta_a[j].item()) + delta_c
+            if delta_total < best_delta:
+                best_delta = delta_total
+                best = c
+        if best is not None:
+            # Commit swap (equal sizes => zero-overlap preserved)
+            xa, ya = float(x[a].item()), float(y[a].item())
+            xb, yb = float(x[best].item()), float(y[best].item())
+            x[a], x[best] = xb, xa
+            y[a], y[best] = yb, ya
+            swaps_done += 1
+
+    # Safety: quick grid-legalize with small budget (should be already legal)
+    cf = fast_legalize(cf, margin=margin, bin_scale=2.0, iters=8)
+    return cf
+
+def efficient_zero_overlap_placement(cell_features, pin_features, edge_list, margin=1e-8, util=1.25, wl_iters=6):
+    """Fast constructive placement with zero-overlap guarantee and WL-aware ordering.
+
+    Steps:
+      1) Shelf-pack all cells (sorted by height) to guarantee zero-overlap.
+      2) Build cell-cell adjacency from netlist.
+      3) Iterate: compute desired x = mean(neighbor x), reorder within each shelf by desired x, re-pack shelf.
+    """
+    cf = cell_features.clone()
+    # Initial shelf packing
+    cf = _shelf_pack(cf, margin=margin)
+
+    # Build adjacency
+    nbrs = _build_cell_adjacency(pin_features, edge_list)
+    if not nbrs:
+        return cf
+
+    # Recover shelves from current positions by scanning top-to-bottom bands
+    x = cf[:, CellFeatureIdx.X]
+    y = cf[:, CellFeatureIdx.Y]
+    w = cf[:, CellFeatureIdx.WIDTH]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+
+    # Approximate shelves by grouping cells with similar y centers within tolerance
+    order_y = torch.argsort(y).tolist()
+    shelves = []  # list of (indices)
+    shelf = [order_y[0]] if order_y else []
+    tol = 1e-6
+    for prev, idx in zip(order_y, order_y[1:]):
+        same_row = abs(float(y[idx] - y[prev])) <= (max(float(h[idx]), float(h[prev])) * 0.1 + tol)
+        if same_row:
+            shelf.append(idx)
+        else:
+            shelves.append(shelf)
+            shelf = [idx]
+    if shelf:
+        shelves.append(shelf)
+
+    # Compute a target die width from total area for repacking inside shelves
+    total_area = float((w * h).sum().item())
+    target_w = (total_area ** 0.5) * util + 2 * margin
+
+    N = cf.shape[0]
+    wl_iters_local = 2 if N >= 1000 else wl_iters
+    for _ in range(max(0, wl_iters_local)):
+        # Desired x: mean of neighbor x; fallback to current x if no neighbors
+        cur_x = cf[:, CellFeatureIdx.X].detach().clone()
+        desired_x = cur_x.clone()
+        for i, ns in enumerate(nbrs):
+            if ns:
+                s = sum(cur_x[j].item() for j in ns)
+                desired_x[i] = s / len(ns)
+
+        # Reorder within each shelf by desired x and re-pack left-to-right
+        new_x = cur_x.clone()
+        new_y = cf[:, CellFeatureIdx.Y].detach().clone()
+        for shelf_indices in shelves:
+            shelf_indices = list(shelf_indices)
+            # Sort by desired_x
+            shelf_indices.sort(key=lambda i: float(desired_x[i]))
+            # Determine this shelf y and height as current max height in shelf
+            sh = max(float(h[i]) for i in shelf_indices) + 2 * margin
+            # Place left-to-right
+            cx = 0.0
+            # Center y remains the same band; anchor at min current y of shelf
+            # Compute band base from min center y and shelf height
+            band_y_center = sum(float(y[i]) for i in shelf_indices) / len(shelf_indices)
+            band_y_min = band_y_center - sh / 2.0 + margin
+            band_y_center = band_y_min + sh / 2.0 - margin
+            for i in shelf_indices:
+                wi = float(w[i]) + 2 * margin
+                new_x[i] = cx + wi / 2.0 - margin
+                new_y[i] = band_y_center
+                cx += wi
+            # If shelf exceeds target width, just allow; no overlap within shelf regardless
+        cf[:, CellFeatureIdx.X] = new_x
+        cf[:, CellFeatureIdx.Y] = new_y
+        # Safety: ensure zero-overlap after each iteration
+        cf = fast_legalize(cf, margin=margin, bin_scale=2.0, iters=20 if N >= 1000 else 30)
+    # Local WL refinement with adjacent swaps (keeps zero-overlap)
+    cf = greedy_shelf_swaps(cf, pin_features, edge_list, margin=max(margin, 1e-4), max_passes=1 if N >= 1000 else 2)
+    return cf
+
+def _pack_by_barycentric(cf, pin_features, edge_list, margin=1e-4, util=1.05):
+    """Global WL-aware shelf packing using neighbor-average x ordering.
+
+    - Computes desired_x = mean(neighbor x) (fallback to current x).
+    - Sorts cells by desired_x globally.
+    - Packs into shelves (rows) left-to-right up to target width, then new shelf.
+    - Guarantees zero overlap by construction (with margin).
+    """
+    cf = cf.clone()
+    x = cf[:, CellFeatureIdx.X]
+    y = cf[:, CellFeatureIdx.Y]
+    w = cf[:, CellFeatureIdx.WIDTH]
+    h = cf[:, CellFeatureIdx.HEIGHT]
+
+    nbrs = _build_cell_adjacency(pin_features, edge_list)
+    N = cf.shape[0]
+    cur_x = x.detach().clone()
+    desired_x = cur_x.clone()
+    if nbrs:
+        for i, ns in enumerate(nbrs):
+            if ns:
+                desired_x[i] = sum(cur_x[j].item() for j in ns) / len(ns)
+
+    order = sorted(range(N), key=lambda i: float(desired_x[i]))
+
+    total_area = float((w * h).sum().item())
+    target_w = (total_area ** 0.5) * util + 2 * margin
+
+    new_x = x.clone()
+    new_y = y.clone()
+    cur_x_acc = 0.0
+    cur_y_acc = 0.0
+    shelf_h = 0.0
+
+    for idx in order:
+        wi = float(w[idx]) + 2 * margin
+        hi = float(h[idx]) + 2 * margin
+        if cur_x_acc == 0.0:
+            shelf_h = hi
+        # Start new shelf if overflow
+        if cur_x_acc + wi > target_w and cur_x_acc > 0.0:
+            cur_x_acc = 0.0
+            cur_y_acc += shelf_h
+            shelf_h = hi
+        new_x[idx] = cur_x_acc + wi / 2.0 - margin
+        new_y[idx] = cur_y_acc + hi / 2.0 - margin
+        cur_x_acc += wi
+        shelf_h = max(shelf_h, hi)
+
+    cf[:, CellFeatureIdx.X] = new_x
+    cf[:, CellFeatureIdx.Y] = new_y
+    # Safety: legalize with small iterations (fast) and fallback
+    cf = legalize_placement(cf, margin=margin, max_iters=30, step_frac=0.95)
+    return cf
+
+def global_barycentric_refine(cf, pin_features, edge_list, passes=3, margin=1e-3, util=1.25):
+    out = cf
+    for _ in range(max(0, passes)):
+        out = _pack_by_barycentric(out, pin_features, edge_list, margin=margin, util=util)
+        out = fast_legalize(out, margin=margin, bin_scale=2.0, iters=12)
+    return out
+
+def equal_size_barycentric_assignment(cf, pin_features, edge_list, passes=2, tol=1e-6):
+    """Fast WL reduction by reassigning positions within equal-size groups only.
+
+    For each group of identical (width,height), compute neighbor-average x per cell,
+    then assign the group's existing positions (sorted by x) to cells sorted by desired x.
+    This preserves zero-overlap (positions set unchanged) and is O(E + N log N).
+    """
+    out = cf.clone()
+    weighted = _build_cell_adjacency_weighted(pin_features, edge_list)
+    if not weighted:
+        return out
+    # Group by exact size (with rounding tolerance)
+    w = out[:, CellFeatureIdx.WIDTH]
+    h = out[:, CellFeatureIdx.HEIGHT]
+    buckets = {}
+    for i in range(out.shape[0]):
+        key = (round(float(w[i].item())/tol)*tol, round(float(h[i].item())/tol)*tol)
+        buckets.setdefault(key, []).append(i)
+
+    for _ in range(max(0, passes)):
+        x = out[:, CellFeatureIdx.X]
+        y = out[:, CellFeatureIdx.Y]
+        # Precompute desired x per cell (neighbor average)
+        desired_x = x.clone()
+        for i, nbrs in enumerate(weighted):
+            if nbrs:
+                s = 0.0
+                c = 0
+                for j, wt in nbrs.items():
+                    s += float(x[j].item())
+                    c += 1
+                desired_x[i] = s / c
+        # Reassign within each size bucket
+        for _, idxs in buckets.items():
+            if len(idxs) <= 1:
+                continue
+            # Current positions of this group
+            idxs_sorted_by_pos = sorted(idxs, key=lambda i: float(x[i].item()))
+            positions = [(float(x[i].item()), float(y[i].item())) for i in idxs_sorted_by_pos]
+            # Order cells by desired_x
+            idxs_sorted_by_desired = sorted(idxs, key=lambda i: float(desired_x[i].item()))
+            # Assign positions to match desired order
+            for k, cell_idx in enumerate(idxs_sorted_by_desired):
+                px, py = positions[k]
+                out[cell_idx, CellFeatureIdx.X] = px
+                out[cell_idx, CellFeatureIdx.Y] = py
+        # Next pass uses updated positions
+    return out
+
+
+def advanced_constructive_placement(cell_features):
+    """
+    Places cells using a greedy best-fit algorithm that manages free space.
+    """
+    # 1. Data Preparation (from Step 1 above)
+    areas = cell_features[:, CellFeatureIdx.AREA] 
+    sorted_indices_by_area = torch.argsort(areas, descending=True)
+    is_placed = [False] * cell_features.shape[0]
+
+    # 2. Initialize Free Space
+    total_area = areas.sum() 
+    chip_side = torch.sqrt(total_area * 1.20)
+    # List of free rects: [x_min, y_min, x_max, y_max]
+    free_rects = [[0.0, 0.0, chip_side.item(), chip_side.item()]]
+
+    for _ in range(cell_features.shape[0]):
+        # a. Select a free rectangle to fill (e.g., the bottom-most, then left-most one)
+        free_rects.sort(key=lambda r: (r[1], r[0]))
+        rect_to_fill = free_rects.pop(0)
+        rect_w = rect_to_fill[2] - rect_to_fill[0]
+        rect_h = rect_to_fill[3] - rect_to_fill[1]
+
+        # b. & c. Find the best cell to place
+        best_cell_idx = -1
+        
+        # Priority 1: Search for a perfect fit
+        for idx in range(cell_features.shape[0]):
+            if not is_placed[idx]:
+                cell_w = cell_features[idx, CellFeatureIdx.WIDTH] 
+                cell_h = cell_features[idx, CellFeatureIdx.HEIGHT] 
+                if cell_w == rect_w and cell_h == rect_h:
+                    best_cell_idx = idx
+                    break
+        
+        # Priority 2: Find the next biggest that fits
+        if best_cell_idx == -1:
+            for idx in sorted_indices_by_area:
+                if not is_placed[idx.item()]:
+                    cell_w = cell_features[idx.item(), CellFeatureIdx.WIDTH] 
+                    cell_h = cell_features[idx.item(), CellFeatureIdx.HEIGHT] 
+                    if cell_w <= rect_w and cell_h <= rect_h:
+                        best_cell_idx = idx.item()
+                        break
+        
+        if best_cell_idx != -1:
+            # d. Place the block
+            is_placed[best_cell_idx] = True
+            cell_w = cell_features[best_cell_idx, CellFeatureIdx.WIDTH] 
+            cell_h = cell_features[best_cell_idx, CellFeatureIdx.HEIGHT] 
+            
+            # Place at the bottom-left of the chosen rectangle
+            x_pos = rect_to_fill[0] + cell_w / 2
+            y_pos = rect_to_fill[1] + cell_h / 2
+            cell_features[best_cell_idx, CellFeatureIdx.X] = x_pos 
+            cell_features[best_cell_idx, CellFeatureIdx.Y] = y_pos 
+
+            # e. Update Free Space (simple version)
+            # Create a new rect to the right
+            new_rect_right = [rect_to_fill[0] + cell_w.item(), rect_to_fill[1], rect_to_fill[2], rect_to_fill[1] + cell_h.item()]
+            # Create a new rect above
+            new_rect_above = [rect_to_fill[0], rect_to_fill[1] + cell_h.item(), rect_to_fill[2], rect_to_fill[3]]
+            
+            free_rects.append(new_rect_right)
+            free_rects.append(new_rect_above)
+            
+            # (A more advanced implementation would need to merge adjacent free rectangles)
+
+    return cell_features
 
 # ======= FINAL EVALUATION CODE (Don't edit this part) =======
 
@@ -697,7 +1514,10 @@ def plot_placement(
             ax.set_ylim(all_y.min() - margin, all_y.max() + margin)
 
         plt.tight_layout()
-        output_path = os.path.join(OUTPUT_DIR, filename)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        plots_dir = os.path.join(OUTPUT_DIR, "plots")
+        os.makedirs(plots_dir, exist_ok=True)
+        output_path = os.path.join(plots_dir, f"{ts}.png")
         plt.savefig(output_path, dpi=150, bbox_inches="tight")
         plt.close()
 
@@ -730,14 +1550,9 @@ def main():
         num_macros, num_std_cells
     )
 
-    # Initialize positions with random spread to reduce initial overlaps
-    total_cells = cell_features.shape[0]
-    spread_radius = 30.0
-    angles = torch.rand(total_cells) * 2 * 3.14159
-    radii = torch.rand(total_cells) * spread_radius
-
-    cell_features[:, 2] = radii * torch.cos(angles)
-    cell_features[:, 3] = radii * torch.sin(angles)
+    # Initialize positions with the advanced constructive placement algorithm
+    # This replaces the old "random spread" logic.
+    cell_features = advanced_constructive_placement(cell_features)
 
     # Calculate initial metrics
     print("\n" + "=" * 70)
@@ -758,8 +1573,13 @@ def main():
         cell_features,
         pin_features,
         edge_list,
+        # Tuned hyperparameters for refining a high-quality initial placement
+        num_epochs=1500,
+        lr=0.008,
+        lambda_overlap_initial=0.1,
+        lambda_overlap_final=1000.0,
         verbose=True,
-        log_interval=200,
+        log_interval=500,
     )
 
     # Calculate final metrics (both detailed and normalized)
