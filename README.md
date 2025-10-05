@@ -30,19 +30,25 @@ We will review submissions on a rolling basis.
 
 ## Leaderboard (sorted by overlap)
 
-| Rank | Name             | Overlap    | Wirelength (um) | Runtime (s) | Notes                                                      |
-| ---- | ---------------- | ---------- | --------------- | ----------- | ---------------------------------------------------------- |
-| 1    | Leison Gao       | 0.0000     | 0.2796          | 50.14       |                                                            |
-| 2    | Ashmit Dutta     | 0.0000     | 0.2870          | 995.58      | Spent my entire morning (12 am - 6 am) doing this :P       |
-| 3    | Aleksey Valouev  | 0.0000     | 0.3577          | 118.98      |                                                            |
-| 4    | Mohul Shukla     | 0.0000     | 0.5048          | 54.60       |                                                            |
-| 5    | Ryan Hulke       | 0.0000     | 0.5226          | 166.24      |                                                            |
-| 6    | Neel Shah        | 0.0000     | 0.5445          | 45.40       | Zero overlaps on all tests, adaptive schedule + early stop |
-| 7    | **Shiva Baghel** | **0.0000** | **0.5885**      | **491.00**  | Stable zero-overlap with balanced optimization             |
-| 8    | Akash Pai        | 0.0006     | 0.4933          | 326.25      |                                                            |
-| 9    | Prithvi Seran    | 0.0499     | 0.4890          | 398.58      |                                                            |
-| 10   | partcl example   | 0.8        | 0.4             | 5           | example                                                    |
-| 11   | Add Yours!       |            |                 |             |                                                            |
+| Rank | Name              | Overlap    | Wirelength (um) | Runtime (s) | Notes                                                                                                    |
+| ---- | ----------------- | ---------- | --------------- | ----------- | -------------------------------------------------------------------------------------------------------- |
+| 1    | Brayden Rudisill  | 0.0000     | 0.2611          | 50.51       | Timed on a mac air                                                                                       |
+| 2    | Leison Gao        | 0.0000     | 0.2796          | 50.14       |                                                                                                          |
+| 3    | William Pan       | 0.0000     | 0.2848          | 155.33      |                                                                                                          |
+| 4    | Ashmit Dutta      | 0.0000     | 0.2870          | 995.58      | Spent my entire morning (12 am - 6 am) doing this :P                                                     |
+| 5    | Gabriel Del Monte | 0.0000     | 0.3427          | 606.07      |                                                                                                          |
+| 6    | Aleksey Valouev   | 0.0000     | 0.3577          | 118.98      |                                                                                                          |
+| 7    | Shashank Shriram  | 0.0000     | 0.4634          | 7.08        | 🏎️                                                                                                      |
+| 8    | Mohul Shukla      | 0.0000     | 0.5048          | 54.60       |                                                                                                          |
+| 9    | Ryan Hulke        | 0.0000     | 0.5226          | 166.24      |                                                                                                          |
+| 10   | Neel Shah         | 0.0000     | 0.5445          | 45.40       | Zero overlaps on all tests, adaptive schedule + early stop                                               |
+| 11   | Shiva Baghel.     | 0.0000     | 0.5885          | 491.00      | Stable zero-overlap with balanced optimization                                                           |
+| 12   | Vansh Jain        | 0.0000     | 0.9352          | 86.36       |                                                                                                          |
+| 13   | Akash Pai         | 0.0006     | 0.4933          | 326.25      |                                                                                                          |
+| 14   | Sean Ko           | 0.0271     | 0.5138          | 31.83       | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |
+| 15   | Prithvi Seran     | 0.0499     | 0.4890          | 398.58      |                                                                                                          |
+| 16   | partcl example    | 0.8        | 0.4             | 5           | example                                                                                                  |
+| 17   | Add Yours!        |            |                 |             |                                                                                                          |
 
 
 > **To add your results:**  
