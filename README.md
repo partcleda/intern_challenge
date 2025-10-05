@@ -1,12 +1,16 @@
 # Intern Challenge: Placement Problem
 
-Welcome to the par.tcl 2026 ML Sys intern challenge! Your task is to solve a placement problem involving standard cells (small blocks) and macros (large blocks). The goal is to minimize the overlap area and the wirelength of the connections between the blocks. A valid placement must ensure that no blocks overlap, but we will look at amount of overlap and wirelength as a metric for how good the placement is.
+Welcome to the par.tcl 2026 ML Sys intern challenge! Your task is to solve a placement problem involving standard cells (small blocks) and macros (large blocks). The **primary goal is to minimize overlap** between blocks. Wirelength is also evaluated, but **overlap is the dominant objective**. A valid placement must eventually ensure no blocks overlap, but we will judge solutions by how effectively you reduce overlap and, secondarily, how well you handle wirelength.
+
+The deadline is when all intern slots for summer 2026 are filled. We will review submissions on a rolling basis.
 
 ## Problem Statement
 
-- **Objective:** Place a set of standard cells and macros on a chip layout to minimize overlap and wirelength. We will define overlap as num overlapping cells / num total cells. But you can implement your overlap loss however you think is best. Solving this problem will require designing a good overlap loss, and deciding how to play with hyperparameters and optimizers to get the best results. Nothing is off the table. 
+- **Objective:** Place a set of standard cells and macros on a chip layout to **minimize overlap (most important)** and wirelength (secondary).
+  - Overlap will be measured as `num overlapping cells / num total cells`, though you are encouraged to define and implement your own overlap loss function if you think it's better.
+  - Solving this problem will require designing a strong overlap loss, tuning hyperparameters, and experimenting with optimizers. Creativity is encouraged — nothing is off the table.
 - **Input:** Randomly generated netlists.
-- **Output:** Average normalized wirelength and overlap across a set of randomized placements.
+- **Output:** Average normalized **overlap (primary metric)** and wirelength (secondary metric) across a set of randomized placements.
 
 ## Submission Instructions
 
@@ -17,17 +21,34 @@ Welcome to the par.tcl 2026 ML Sys intern challenge! Your task is to solve a pla
 
 Note: You can use any libraries or frameworks you like, but please ensure that your code is well-documented and easy to follow.
 
-Also, if you think there are any bugs in the provided code, please feel free to fix them and mention the changes in your submission.
+Also, if you think there are any bugs in the provided code, feel free to fix them and mention the changes in your submission.
 
+You may submit multiple solutions to try and increase your score.
 
-## Leaderboard
+We will review submissions on a rolling basis.
 
-| Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
-|------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    | partcl baseline | 0.8         | 0.4             | 5           | Baseline solution    |
-| 2    | *Add yours!*    |             |                 |             |                      |
+## Leaderboard (sorted by overlap)
+
+| Rank | Name              | Overlap | Wirelength (um) | Runtime (s) | Notes                                                                                                     |
+| ---- | ----------------- | ------- | --------------- | ----------- | --------------------------------------------------------------------------------------------------------- |
+| 1    | Brayden Rudisill  | 0.0000  | 0.2611          | 50.51       | Timed on a mac air                                                                                        |
+| 2    | Leison Gao        | 0.0000  | 0.2796          | 50.14s      |                                                                                                           |
+| 3    | William Pan       | 0.0000  | 0.2848          | 155.33s     |                                                                                                           |
+| 4    | Neil Teje         | 0.0000  | 0.2700          | 24.00s      |                                                                                                           |
+| 5    | Ashmit Dutta      | 0.0000  | 0.2870          | 995.58      | Spent my entire morning (12 am - 6 am) doing this :P                                                      |
+| 6    | Gabriel Del Monte | 0.0000  | 0.3427          | 606.07      |                                                                                                           |
+| 7    | Aleksey Valouev   | 0.0000  | 0.3577          | 118.98      |                                                                                                           |
+| 8    | Shashank Shriram  | 0.0000  | 0.4634          | 7.08        | 🏎️                                                                                                       |
+| 9    | Mohul Shukla      | 0.0000  | 0.5048          | 54.60s      |                                                                                                           |
+| 10   | Ryan Hulke        | 0.0000  | 0.5226          | 166.24      |                                                                                                           |
+| 11   | Neel Shah         | 0.0000  | 0.5445          | 45.40       | Zero overlaps on all tests, adaptive schedule + early stop                                                |
+| 12   | Vansh Jain        | 0.0000  | 0.9352          | 86.36       |                                                                                                           |
+| 13   | Akash Pai         | 0.0006  | 0.4933          | 326.25s     |                                                                                                           |
+| 14   | Sean Ko           | 0.0271  | .5138           | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |
+| 15   | Prithvi Seran     | 0.0499  | 0.4890          | 398.58      |                                                                                                           |
+| 16   | partcl example    | 0.8     | 0.4             | 5           | example                                                                                                   |
 
 > **To add your results:**  
-> Insert a new row in the table above with your name, overlap, wirelength, and any notes.
+> Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.
 
 Good luck!

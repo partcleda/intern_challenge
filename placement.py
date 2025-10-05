@@ -282,19 +282,13 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     tgt_x = pin_absolute_x[tgt_pins]
     tgt_y = pin_absolute_y[tgt_pins]
 
-    # Calculate smooth approximation of Manhattan distance
-    # Using log-sum-exp approximation for differentiability
-    alpha = 0.1  # Smoothing parameter
+    # Calculate Manhattan distance (L1 norm)
     dx = torch.abs(src_x - tgt_x)
     dy = torch.abs(src_y - tgt_y)
-
-    # Smooth L1 distance with numerical stability
-    smooth_manhattan = alpha * torch.logsumexp(
-        torch.stack([dx / alpha, dy / alpha], dim=0), dim=0
-    )
-
+    manhattan_distances = dx + dy
+    
     # Total wirelength
-    total_wirelength = torch.sum(smooth_manhattan)
+    total_wirelength = torch.sum(manhattan_distances)
 
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
@@ -357,7 +351,30 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     # Delete this placeholder and add your implementation:
 
     # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    x=cell_features[:, 2]
+    y=cell_features[:, 3]
+    widths=cell_features[:, 4]
+    heights=cell_features[:, 5]
+    
+    #calculate distances
+    xi,xj,yi,yj = x.unsqueeze(1),x.unsqueeze(0),y.unsqueeze(1),y.unsqueeze(0)
+    dx=torch.abs(xi-xj)
+    dy=torch.abs(yi-yj)
+
+    #calc minimum separation
+    wi,wj,hi,hj = widths.unsqueeze(1),widths.unsqueeze(0),heights.unsqueeze(1),heights.unsqueeze(0)
+    min_dx = (wi+wj)/ 2
+    min_dy = (hi+hj)/ 2
+
+    overlapx = torch.relu(min_dx - dx)
+    overlapy = torch.relu(min_dy - dy)
+    areaoverlap = overlapx*overlapy
+    mask = torch.triu(torch.ones(N,N,device=cell_features.device,dtype=torch.bool),diagonal=1)
+    masked_areaoverlap = areaoverlap[mask]
+
+    #penalty for strong gradients
+    penalty = torch.sum(torch.exp(masked_areaoverlap) - 1)
+    return penalty
 
 
 def train_placement(
