@@ -113,6 +113,8 @@ def run_placement_test(
         "num_cells_with_overlaps": metrics["num_cells_with_overlaps"],
         "overlap_ratio": metrics["overlap_ratio"],
         "normalized_wl": metrics["normalized_wl"],
+        "core_area": metrics["core_area"],
+        "core_utilization": metrics["core_utilization"],
     }
 
 
@@ -157,6 +159,8 @@ def run_all_tests():
         status = "✓ PASS" if result["num_cells_with_overlaps"] == 0 else "✗ FAIL"
         print(f"  Overlap Ratio: {result['overlap_ratio']:.4f} ({result['num_cells_with_overlaps']}/{result['total_cells']} cells)")
         print(f"  Normalized WL: {result['normalized_wl']:.4f}")
+        print(f"  Core Area: {result['core_area']:.2f}")
+        print(f"  Core Utilization: {result['core_utilization']:.2f}")
         print(f"  Time: {result['elapsed_time']:.2f}s")
         print(f"  Status: {status}")
         print()
@@ -164,6 +168,7 @@ def run_all_tests():
     # Compute aggregate statistics
     avg_overlap_ratio = sum(r["overlap_ratio"] for r in all_results) / len(all_results)
     avg_normalized_wl = sum(r["normalized_wl"] for r in all_results) / len(all_results)
+    avg_core_utilization = sum(r["core_utilization"] for r in all_results) / len(all_results)
     total_time = sum(r["elapsed_time"] for r in all_results)
 
     # Print aggregate results
@@ -172,6 +177,7 @@ def run_all_tests():
     print("=" * 70)
     print(f"Average Overlap: {avg_overlap_ratio:.4f}")
     print(f"Average Wirelength: {avg_normalized_wl:.4f}")
+    print(f"Average Core Utilization: {avg_core_utilization:.2f}")
     print(f"Total Runtime: {total_time:.2f}s")
     print()
 
