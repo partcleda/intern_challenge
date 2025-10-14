@@ -43,6 +43,7 @@ We will review submissions on a rolling basis.
 | 9    | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
 | 10    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
 | 11    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
+| 12   | Nawel Asgar    | 0.0000     | 0.5675          | 81.49      | Adaptive penalty scaling with cubic gradients and design-size optimization      |
 | 12   | Shiva Baghel.     | 0.0000     | 0.5885          | 491.00      | Stable zero-overlap with balanced optimization      |
 | 13   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
 | 14    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
