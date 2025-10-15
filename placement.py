@@ -270,33 +270,27 @@ def generate_placement_input(num_macros, num_std_cells):
 # ======= OPTIMIZATION CODE (edit this part) =======
 
 def wirelength_attraction_loss(cell_features, pin_features, edge_list):
-    """Calculate loss based on total wirelength to minimize routing.
+    """Degree-normalized, macro-aware smooth Manhattan wirelength loss.
 
-    This is a REFERENCE IMPLEMENTATION showing how to write a differentiable loss function.
+    Keeps the same smoothed |dx|+|dy| formulation but reweights per-edge by:
+      - degree normalization: w_deg = 1/sqrt(deg[src]*deg[tgt] + eps)
+      - macro emphasis: w_macro = 1 + alpha if either endpoint pin belongs to a macro cell
 
-    The loss computes the Manhattan distance between connected pins and minimizes
-    the total wirelength across all edges.
-
-    Args:
-        cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
-        pin_features: [P, 7] tensor with pin information
-        edge_list: [E, 2] tensor with edges
-
-    Returns:
-        Scalar loss value
+    Returns a mean over edges (scale comparable to prior version).
     """
+    device = cell_features.device
     if edge_list.shape[0] == 0:
-        return torch.tensor(0.0, requires_grad=True)
+        return torch.tensor(0.0, device=device, requires_grad=True)
 
     # Update absolute pin positions based on cell positions
     cell_positions = cell_features[:, 2:4]  # [N, 2]
-    cell_indices = pin_features[:, 0].long()
+    cell_indices = pin_features[:, PinFeatureIdx.CELL_IDX].long()
 
-    # Calculate absolute pin positions
-    pin_absolute_x = cell_positions[cell_indices, 0] + pin_features[:, 1]
-    pin_absolute_y = cell_positions[cell_indices, 1] + pin_features[:, 2]
+    # Absolute pin positions
+    pin_absolute_x = cell_positions[cell_indices, 0] + pin_features[:, PinFeatureIdx.PIN_X]
+    pin_absolute_y = cell_positions[cell_indices, 1] + pin_features[:, PinFeatureIdx.PIN_Y]
 
-    # Get source and target pin positions for each edge
+    # Edge endpoints
     src_pins = edge_list[:, 0].long()
     tgt_pins = edge_list[:, 1].long()
 
@@ -305,21 +299,36 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     tgt_x = pin_absolute_x[tgt_pins]
     tgt_y = pin_absolute_y[tgt_pins]
 
-    # Calculate smooth approximation of Manhattan distance
-    # Using log-sum-exp approximation for differentiability
-    alpha = 0.1  # Smoothing parameter
+    # Smooth approximation of Manhattan distance using log-sum-exp
+    alpha = 0.1  # smoothing parameter (kept consistent with previous)
     dx = torch.abs(src_x - tgt_x)
     dy = torch.abs(src_y - tgt_y)
-
-    # Smooth L1 distance with numerical stability
     smooth_manhattan = alpha * torch.logsumexp(
         torch.stack([dx / alpha, dy / alpha], dim=0), dim=0
     )
 
-    # Total wirelength
-    total_wirelength = torch.sum(smooth_manhattan)
+    # Per-pin degree for degree-normalized weighting
+    P = pin_features.shape[0]
+    # Use bincount for efficiency; ensure proper length via minlength
+    deg = torch.bincount(torch.cat([src_pins, tgt_pins]), minlength=P).to(device=device, dtype=torch.float32)
+    w_deg = 1.0 / torch.sqrt(deg[src_pins] * deg[tgt_pins] + 1e-6)
 
-    return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
+    # Macro emphasis: boost edges incident to macros
+    cell_area = cell_features[:, CellFeatureIdx.AREA]
+    macro_cell = (cell_area >= MIN_MACRO_AREA)
+    macro_pin = macro_cell[cell_indices]
+    macro_src = macro_pin[src_pins]
+    macro_tgt = macro_pin[tgt_pins]
+    # Alpha for macro emphasis (modest boost)
+    macro_alpha = 0.3
+    w_macro = 1.0 + macro_alpha * (macro_src | macro_tgt).to(dtype=torch.float32)
+
+    # Final per-edge weight
+    w = w_deg * w_macro
+
+    # Weighted mean wirelength
+    total = (w * smooth_manhattan).sum()
+    return total / edge_list.shape[0]
 
 
 def overlap_repulsion_loss(cell_features, pin_features, edge_list):
@@ -463,9 +472,11 @@ def train_placement(
     elif N >= 300:
         num_epochs_eff = 24
         constructive_iters = 3
-        barycentric_passes = 2
-        swap_top_k_edges = 700
-        swap_max_count = 200
+        # Slightly deeper barycentric refinement (cap at 3)
+        barycentric_passes = 3
+        # More aggressive swap search with a modest cap relative to N
+        swap_top_k_edges = 1000
+        swap_max_count = min(250, max(1, N // 5))
         post_legalize_steps = 4
     else:
         num_epochs_eff = 30
@@ -536,8 +547,24 @@ def train_placement(
         _wl_before = wirelength_attraction_loss(final_cell_features, pin_features, edge_list).item()
         _packed = _pack_by_barycentric(final_cell_features, pin_features, edge_list, margin=1e-4, util=1.05)
         _wl_after = wirelength_attraction_loss(_packed, pin_features, edge_list).item()
-        if _wl_after <= _wl_before:
+        if (_wl_after <= _wl_before) and (not _has_overlaps(_packed, margin=1e-4)):
             final_cell_features = _packed
+
+        # === 5. WL Polish with Projection (WL-guarded) ===
+        wl_before = wirelength_attraction_loss(final_cell_features, pin_features, edge_list).item()
+        steps = 5 if N >= 1000 else 10
+        candidate = wl_polish_projected(
+            final_cell_features,
+            pin_features,
+            edge_list,
+            steps=steps,
+            lr=0.03,
+            legal_iters=12,
+            margin=1e-4,
+        )
+        wl_after = wirelength_attraction_loss(candidate, pin_features, edge_list).item()
+        if (not _has_overlaps(candidate, margin=1e-4)) and (wl_after <= wl_before - 1e-9):
+            final_cell_features = candidate
 
     # Optional plot saving: set SAVE_PLOTS=1 to enable during tests
     if os.environ.get("SAVE_PLOTS") == "1":
@@ -551,6 +578,35 @@ def train_placement(
         "initial_cell_features": initial_cell_features,
         "loss_history": loss_history,
     }
+
+def wl_polish_projected(cf, pin_features, edge_list, steps=10, lr=0.03, legal_iters=12, margin=1e-4):
+    """WL-only polish: few gradient steps, then project to legal.
+
+    - Optimizes only wirelength for a small number of iterations.
+    - Projects to zero-overlap with fast_legalize after each step.
+    - Returns a new tensor with updated [:,2:4] and preserves sizes.
+    """
+    if cf.shape[0] <= 1 or edge_list.shape[0] == 0:
+        return cf
+    out = cf.clone()
+    pos = out[:, 2:4].detach().clone().requires_grad_(True)
+    optimizer = optim.Adam([pos], lr=lr)
+    for _ in range(max(0, int(steps))):
+        optimizer.zero_grad()
+        cur = out.clone()
+        cur[:, 2:4] = pos
+        wl = wirelength_attraction_loss(cur, pin_features, edge_list)
+        wl.backward()
+        torch.nn.utils.clip_grad_norm_([pos], max_norm=5.0)
+        optimizer.step()
+        with torch.no_grad():
+            tmp = out.clone()
+            tmp[:, 2:4] = pos
+            tmp = fast_legalize(tmp, margin=margin, bin_scale=2.0, iters=int(legal_iters))
+            pos.copy_(tmp[:, 2:4])
+    final = out.clone()
+    final[:, 2:4] = pos.detach()
+    return final
 
 def legalize_placement(cell_features, margin=0.0, max_iters=300, step_frac=0.9, tol=1e-6):
     """
