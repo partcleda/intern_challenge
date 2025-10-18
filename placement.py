@@ -299,7 +299,7 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
 
-def overlap_repulsion_loss(cell_features, pin_features, edge_list):
+def overlap_repulsion_loss(cell_features, pin_features, edge_list,  lam=1.0, alpha=10.0):
     """Calculate loss to prevent cell overlaps.
 
     TODO: IMPLEMENT THIS FUNCTION
@@ -343,31 +343,51 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     Returns:
         Scalar loss value (should be 0 when no overlaps exist)
     """
+    # def overlap_repulsion_loss(cell_features, pin_features, edge_list, lam=1.0, alpha=10.0):
+    # """
+    # Calculates logarithmic-based loss to prevent cell overlaps.
+    # Uses log(1 + overlap_area) to maintain differentiability and the correct sign.
+    # """
     N = cell_features.shape[0]
     if N <= 1:
         return torch.tensor(0.0, requires_grad=True)
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    # 1. Extract and Calculate Overlap Area (using standard ReLU method)
+    positions = cell_features[:, 2:4]
+    widths = cell_features[:, 4]
+    heights = cell_features[:, 5]
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    # Vectorized calculation of pairwise distances and minimum separation
+    abs_dist_x = (positions.unsqueeze(1) - positions.unsqueeze(0)).abs()[:, :, 0]
+    abs_dist_y = (positions.unsqueeze(1) - positions.unsqueeze(0)).abs()[:, :, 1]
+    min_sep_x = (widths.unsqueeze(1) + widths.unsqueeze(0)) / 2.0
+    min_sep_y = (heights.unsqueeze(1) + heights.unsqueeze(0)) / 2.0
 
+    # Calculate overlap distance using torch.relu
+    overlap_x = torch.relu(min_sep_x - abs_dist_x)
+    overlap_y = torch.relu(min_sep_y - abs_dist_y)
+    overlap_area = overlap_x * overlap_y           # [N, N]
+
+    # 2. Apply Penalty (Softplus is safer)
+    SCALE_FACTOR = 500.0
+    penalty = torch.nn.functional.softplus(SCALE_FACTOR * overlap_area)
+    
+    # 5. Mask, Sum, and Normalize
+    mask = torch.triu(torch.ones_like(overlap_area, dtype=torch.bool), diagonal=1)
+    total_penalty = (penalty * mask).sum()
+    num_pairs = N * (N - 1) / 2.0
+    overlap_loss = total_penalty / num_pairs
+
+    return overlap_loss
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
+    num_epochs=6000,
+    lr=0.02,
     lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    lambda_overlap=2000.0,
     verbose=True,
     log_interval=100,
 ):
@@ -398,6 +418,10 @@ def train_placement(
     cell_positions = cell_features[:, 2:4].clone().detach()
     cell_positions.requires_grad_(True)
 
+    EARLY_STOP_WINDOW = 200 # Number of consecutive epochs with 0 overlap to stop
+    OVERLAP_TOLERANCE = 1e-4 # Threshold for considering overlap loss "zero"
+    zero_overlap_count = 0
+
     # Create optimizer
     optimizer = optim.Adam([cell_positions], lr=lr)
 
@@ -407,7 +431,7 @@ def train_placement(
         "wirelength_loss": [],
         "overlap_loss": [],
     }
-
+    # scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.999)
     # Training loop
     for epoch in range(num_epochs):
         optimizer.zero_grad()
@@ -424,8 +448,21 @@ def train_placement(
             cell_features_current, pin_features, edge_list
         )
 
+        if overlap_loss.item() < OVERLAP_TOLERANCE:
+            zero_overlap_count += 1
+        else:
+            zero_overlap_count = 0 # Reset counter if overlap reappears
+        
+        if zero_overlap_count >= EARLY_STOP_WINDOW:
+            if verbose:
+                print("\n" + "=" * 50)
+                print(f"EARLY STOP: Overlaps cleared for {EARLY_STOP_WINDOW} epochs.")
+                print("=" * 50)
+            break # Exit the training loop
+
         # Combined loss
         total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+
 
         # Backward pass
         total_loss.backward()
@@ -435,7 +472,7 @@ def train_placement(
 
         # Update positions
         optimizer.step()
-
+        # scheduler.step()
         # Record losses
         loss_history["total_loss"].append(total_loss.item())
         loss_history["wirelength_loss"].append(wl_loss.item())
@@ -813,4 +850,4 @@ def main():
     )
 
 if __name__ == "__main__":
-    main()
+    main() 
