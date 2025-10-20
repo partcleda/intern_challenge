@@ -48,7 +48,7 @@ We will review submissions on a rolling basis.
 | 14    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
 | 15    | Zade Mahayni     | 0.00665     | 0.5157          |  127.4     | Will try again tomorrow |
 | 16    | Nithin Yanna    | 0.0148      | 0.5034          | 247.30s     | aggressive overlap penalty with quadratic scaling |
-| 17    | Keya Gohil    | 0.0222      | 0.4819          | 1175.19     | Still working |
+| 17    | Keya Gohil    | 0.0155      | 0.4678         | 1513.07     | Still working |
 | 18    | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |  
 | 18    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
 | 20    | partcl example  | 0.8         | 0.4             | 5           | example              |
