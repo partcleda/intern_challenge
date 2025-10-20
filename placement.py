@@ -374,7 +374,7 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list,  lam=1.0, alp
     
     # 5. Mask, Sum, and Normalize
     mask = torch.triu(torch.ones_like(overlap_area, dtype=torch.bool), diagonal=1)
-    total_penalty = (penalty * mask).sum()
+    total_penalty = (penalty*mask).sum()
     num_pairs = N * (N - 1) / 2.0
     overlap_loss = total_penalty / num_pairs
 
@@ -384,8 +384,8 @@ def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=6000,
-    lr=0.02,
+    num_epochs=4000,
+    lr=0.06,
     lambda_wirelength=1.0,
     lambda_overlap=2000.0,
     verbose=True,
