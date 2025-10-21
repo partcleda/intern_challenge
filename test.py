@@ -90,6 +90,7 @@ def run_placement_test(
     # Run optimization with default hyperparameters
     start_time = time.time()
     result = train_placement(
+        str(test_id),
         cell_features,
         pin_features,
         edge_list,
