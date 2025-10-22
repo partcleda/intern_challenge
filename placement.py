@@ -299,70 +299,84 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
 def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch_progress):
-    """Compute differentiable overlap loss with soft wirelength attraction.
+    """
+    New approach taken from prev one: Compute a differentiable overlap loss for VLSI cell placement using a
+    soft-Coulomb repulsion field and smooth overlap barriers.
 
-    Overlap term prevents collisions; attraction term gently pulls connected
-    cells closer together to reduce total wirelength — without normalization.
+    This function penalizes cell overlaps (primary objective) while applying a
+    mild global compression field to encourage compact placements. It operates
+    in O(N²) time by computing pairwise interactions between all cells.
+
+    Components:
+    1. Smooth Overlap Barrier (Main Term):
+       - Uses a differentiable approximation of overlap area between each pair of cells.
+       - The overlap is measured along both x and y axes using `softplus` for
+         smooth gradient behavior.
+       - The penalty increases quadratically with overlap area, ensuring that
+         even small overlaps receive a strong push apart.
+       - The sharpness of the barrier (Beta) increases with training progress
+         (`epoch_progress`) to transition from soft to hard separation.
+
+    2. Soft Coulomb Field (Auxiliary Term):
+       - Adds a gentle global repulsion field that decays proportionally to
+         my decaying field where `r` is pairwise distance.
+       - Helps spread cells evenly early in training, reducing large-scale clustering.
+       - The smoothing factor sigma is annealed to shrink over time, allowing tighter
+         packing as training progresses.
 
     Args:
-        cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height].
-        pin_features: [P, 7] tensor (unused here).
-        edge_list: [E, 2] tensor with connectivity pairs.
-        epoch_progress: scalar for annealing sharpness.
+        cell_features (torch.Tensor): Tensor of shape [N, 6] containing
+            [area, num_pins, x, y, width, height] for each cell.
+        pin_features (torch.Tensor): Unused in this function (for compatibility).
+        edge_list (torch.Tensor): Unused in this function (for compatibility).
+        epoch_progress (float or torch.Tensor): Scalar in [0, 1] controlling
+            annealing sharpness and field smoothing.
 
     Returns:
-        Scalar loss (torch.Tensor).
+        torch.Tensor: Scalar loss combining overlap and field penalties.
+            Lower is better (zero indicates no overlap).
     """
     import torch
+    import torch.nn.functional as F
 
     N = cell_features.shape[0]
+    dev = cell_features.device
+
+    # Handle trivial case with no or single cell
     if N <= 1:
-        return torch.tensor(0.0, device=cell_features.device, requires_grad=True)
+        return torch.tensor(0.0, device=dev, requires_grad=True)
 
-    x, y = cell_features[:, 2], cell_features[:, 3]
-    w, h = cell_features[:, 4], cell_features[:, 5]
+    # Extract cell geometry 
+    x, y = cell_features[:, 2], cell_features[:, 3]  # positions
+    w, h = cell_features[:, 4], cell_features[:, 5]  # sizes
 
-    # Pairwise position deltas
+    # Compute pairwise deltas (broadcasted) 
     dx = x[:, None] - x[None, :]
     dy = y[:, None] - y[None, :]
+    mask = 1.0 - torch.eye(N, device=dev)  # ignore self-pairs
 
-    # Minimum allowed separations along each axis
-    min_sep_x = 0.5 * (w[:, None] + w[None, :])
-    min_sep_y = 0.5 * (h[:, None] + h[None, :])
+    # Minimum required separations along each axis 
+    minx = 0.5 * (w[:, None] + w[None, :])
+    miny = 0.5 * (h[:, None] + h[None, :])
 
+    # Smooth Overlap Barrier 
+    ep = torch.as_tensor(epoch_progress, dtype=torch.float32, device=dev)
+    beta = 0.1 + 4.0 * (ep ** 2)  # annealed sharpness for softplus
+    ox = F.softplus(minx - dx.abs(), beta=beta)  # soft overlap extent in x
+    oy = F.softplus(miny - dy.abs(), beta=beta)  # soft overlap extent in y
 
-    # Smooth overlap penalty
-    beta = (4 * epoch_progress ** 2) + 0.1
-    overlap_x = torch.nn.functional.softplus(min_sep_x - dx.abs(), beta=beta)
-    overlap_y = torch.nn.functional.softplus(min_sep_y - dy.abs(), beta=beta)
-    overlap_area = (overlap_x * overlap_y) ** 2
-
-
-    # Mask self-interactions 
-    mask = 1.0 - torch.eye(N, device=cell_features.device) 
+    # Quadratic penalty on smooth overlap area
+    overlap_area = (ox * oy) ** 2
     overlap_loss = (overlap_area * mask).sum()
 
-    # Trick adjustment: Distance-adaptive micro-attraction
-    if edge_list is not None and len(edge_list) > 0:
-        valid = (edge_list[:, 0] < N) & (edge_list[:, 1] < N)
-        u, v = edge_list[valid, 0], edge_list[valid, 1]
-        dx_e = x[u] - x[v]
-        dy_e = y[u] - y[v]
-        dist_sq = dx_e**2 + dy_e**2 + 1e-6
-        dist = torch.sqrt(dist_sq)
+    # Soft Coulomb Field (Global Repulsion) 
+    dist_sq = dx * dx + dy * dy + 1e-6  # pairwise squared distances
+    sigma = (w.mean() + h.mean()) * (0.4 + 0.6 * (1 - ep))  # annealed smoothing width
+    coulomb = (1.0 / (dist_sq + sigma**2)) * mask  # decaying field
+    field_loss = coulomb.sum() * 1e-3  # small weighting for global spread
 
-        # Adaptive pull: stronger when far n gentle when close
-        # tanh() keeps it bounded and differentiable (yes)
-        adaptive_strength = torch.tanh(dist * 0.5) / (dist + 1e-3)
-
-        # Weighted attraction encourages close packing without collapse
-        attract_loss = (adaptive_strength * dist_sq).mean()
-    else:
-        attract_loss = torch.tensor(0.0, device=cell_features.device)
-
-
-    # Combine: strong overlap repulsion + tiny connection attraction (self note: 0.0025 worked) (passed for all had good values)
-    return overlap_loss + 0.0025 * attract_loss
+    # Total Loss 
+    return overlap_loss + field_loss
 
 
 def train_placement(
