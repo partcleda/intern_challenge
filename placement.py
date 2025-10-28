@@ -358,25 +358,33 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
 
     # Placeholder - returns a constant loss (REPLACE THIS!)
 
+    # Extract geometry
     x = cell_features[:, 2]
     y = cell_features[:, 3]
     w = cell_features[:, 4]
     h = cell_features[:, 5]
 
-    dx = x.unsqueeze(0) - x.unsqueeze(1)  
-    dy = y.unsqueeze(0) - y.unsqueeze(1)  
+    # Pairwise deltas
+    dx = x.unsqueeze(0) - x.unsqueeze(1)  # [N, N]
+    dy = y.unsqueeze(0) - y.unsqueeze(1)  # [N, N]
 
+    # Overlap in x and y (with small margin)
     soft_margin = 1.0
     overlap_x = torch.relu((w.unsqueeze(0) + w.unsqueeze(1)) / 2 + soft_margin - torch.abs(dx))
     overlap_y = torch.relu((h.unsqueeze(0) + h.unsqueeze(1)) / 2 + soft_margin - torch.abs(dy))
 
-    overlap_area = (overlap_x * overlap_y) ** 1.3
-    overlap_area = torch.exp(overlap_area / 10.0) - 1.0
+    # Compute overlap area
+    overlap_area = overlap_x * overlap_y
 
+    # Mask upper triangle (no double counts)
     overlap_area = torch.triu(overlap_area, diagonal=1)
 
-    norm_factor = (w.unsqueeze(0) * h.unsqueeze(0) + w.unsqueeze(1) * h.unsqueeze(1)) / 2
-    loss = (overlap_area / (norm_factor + 1e-6)).mean()
+    # Apply smooth nonlinear scaling to strengthen gradients for small overlaps
+    overlap_area = torch.clamp(overlap_area, min=0.0, max=1e4)
+    overlap_loss = torch.log1p(overlap_area * 0.1).sum()  # log1p for smooth growth
+
+    # Normalize to avoid explosion but keep scale noticeable
+    loss = overlap_loss / (N * N / 2)
 
     return loss
     # return torch.tensor(1.0, requires_grad=True)
@@ -391,7 +399,7 @@ def train_placement(
     lr=0.01,
     lambda_wirelength=1.0,
     # lambda_overlap=10.0,
-    lambda_overlap=40.0,
+    lambda_overlap=150.0,
     verbose=True,
     log_interval=100,
 ):
