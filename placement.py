@@ -357,17 +357,41 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     # Delete this placeholder and add your implementation:
 
     # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+
+    x = cell_features[:, 2]
+    y = cell_features[:, 3]
+    w = cell_features[:, 4]
+    h = cell_features[:, 5]
+
+    dx = x.unsqueeze(0) - x.unsqueeze(1)  
+    dy = y.unsqueeze(0) - y.unsqueeze(1)  
+
+    soft_margin = 1.0
+    overlap_x = torch.relu((w.unsqueeze(0) + w.unsqueeze(1)) / 2 + soft_margin - torch.abs(dx))
+    overlap_y = torch.relu((h.unsqueeze(0) + h.unsqueeze(1)) / 2 + soft_margin - torch.abs(dy))
+
+    overlap_area = (overlap_x * overlap_y) ** 1.3
+    overlap_area = torch.exp(overlap_area / 10.0) - 1.0
+
+    overlap_area = torch.triu(overlap_area, diagonal=1)
+
+    norm_factor = (w.unsqueeze(0) * h.unsqueeze(0) + w.unsqueeze(1) * h.unsqueeze(1)) / 2
+    loss = (overlap_area / (norm_factor + 1e-6)).mean()
+
+    return loss
+    # return torch.tensor(1.0, requires_grad=True)
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
+    # num_epochs=1000,
+    num_epochs=3000,
     lr=0.01,
     lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    # lambda_overlap=10.0,
+    lambda_overlap=40.0,
     verbose=True,
     log_interval=100,
 ):
@@ -390,6 +414,9 @@ def train_placement(
             - initial_cell_features: Original cell positions (for comparison)
             - loss_history: Loss values over time
     """
+
+    cell_features[:, 2:4] += 50.0 * torch.rand_like(cell_features[:, 2:4])
+
     # Clone features and create learnable positions
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
@@ -399,7 +426,8 @@ def train_placement(
     cell_positions.requires_grad_(True)
 
     # Create optimizer
-    optimizer = optim.Adam([cell_positions], lr=lr)
+    optimizer = optim.Adam([cell_positions], lr=0.015)
+    # optimizer = optim.Adam([cell_positions], lr=lr)
 
     # Track loss history
     loss_history = {
@@ -425,7 +453,11 @@ def train_placement(
         )
 
         # Combined loss
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+        # total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+        # Gradually increase overlap repulsion during training
+        lambda_overlap_dynamic = lambda_overlap * (1 + 2 * epoch / num_epochs)
+        total_loss = lambda_wirelength * wl_loss + lambda_overlap_dynamic * overlap_loss
+
 
         # Backward pass
         total_loss.backward()
