@@ -55,6 +55,7 @@ We will review submissions on a rolling basis.
 | 21    | Keya Gohil    | 0.0155      | 0.4678         | 1513.07     | Still working |
 | 22    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
 | 23    | partcl example  | 0.8         | 0.4             | 5           | example              |
+| 24    | Dinmukhamed Tynysbay | 0.0000 | 0.5105          | 3.01        | Softplus overlap loss + dynamic lambda schedule (Apple M3) |
 | 24    | Add Yours!      |             |                 |             |                      |
 
 > **To add your results:**  
