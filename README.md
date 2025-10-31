@@ -32,22 +32,30 @@ We will review submissions on a rolling basis.
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    | Brayden Rudisill  | 0.0000      | 0.2611          | 50.51       |  Timed on a mac air |
-| 2    | Leison Gao      | 0.0000      | 0.2796          | 50.14s      |                      |
-| 3    | William Pan     | 0.0000      | 0.2848          | 155.33s     |                      |
-| 4    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      |  Spent my entire morning (12 am - 6 am) doing this :P       |
-| 5    | Gabriel Del Monte  | 0.0000      | 0.3427          | 606.07      |                                                              |
-| 6    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |
-| 7    | Shashank Shriram| 0.0000      | 0.4634          |   7.08      | 🏎️                    |         
-| 8    | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
-| 9    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
-| 10    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
-| 11   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
-| 12    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
-| 13    | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |  
-| 14    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
-| 15    | partcl example  | 0.8         | 0.4             | 5           | example              |
-| 16    | Add Yours!      |             |                 |             |                      |
+ 1    | Shashank Shriram  | 0.0000     | 0.1310          |  11.32      |   🏎️💥               |
+| 2    | Brayden Rudisill  | 0.0000    | 0.2611          |   50.51     |   Timed on a mac air |
+| 3    | manuhalapeth      | 0.0000    | 0.2630          |  196.8      |                      |
+| 4    | Neil Teje         | 0.0000    | 0.2700          | 24.00s      |                      |
+| 5    | Leison Gao      | 0.0000      | 0.2796          | 50.14s      |                      |
+| 6    | William Pan     | 0.0000      | 0.2848          | 155.33s     |                      |
+| 7    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      |  Spent my entire morning (12 am - 6 am) doing this :P       |
+| 8    | Pawan Paleja     | 0.0000      | 0.3311         | 1.74s     |   Implemented hint for loss func, cosine annealing on learning rate with warmup, std annealing on lambda weight. Used optuna to tune hyperparam. Tested on gh codespaces 2-core.                   |
+| 9    | Gabriel Del Monte  | 0.0000      | 0.3427          | 606.07      |                                                              |
+| 10    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |        
+| 11   | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
+| 12    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
+| 13    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
+| 14   | Nawel Asgar    | 0.0000     | 0.5675          | 81.49      | Adaptive penalty scaling with cubic gradients and design-size optimization
+| 15   | Shiva Baghel     | 0.0000     | 0.5885          | 491.00      | Stable zero-overlap with balanced optimization      |
+| 16   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
+| 17    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
+| 18    | Zade Mahayni     | 0.00665     | 0.5157          |  127.4     | Will try again tomorrow |
+| 19    | Nithin Yanna    | 0.0148      | 0.5034          | 247.30s     | aggressive overlap penalty with quadratic scaling |
+| 20    | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |
+| 21    | Keya Gohil    | 0.0155      | 0.4678         | 1513.07     | Still working |
+| 22    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
+| 23    | partcl example  | 0.8         | 0.4             | 5           | example              |
+| 24    | Add Yours!      |             |                 |             |                      |
 
 > **To add your results:**  
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.
