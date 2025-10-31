@@ -40,6 +40,8 @@ BONUS CHALLENGES:
 
 import os
 from enum import IntEnum
+import torch.nn.functional as F
+
 
 import torch
 import torch.optim as optim
@@ -358,36 +360,38 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
 
     # Placeholder - returns a constant loss (REPLACE THIS!)
 
-    # Extract geometry
     x = cell_features[:, 2]
     y = cell_features[:, 3]
     w = cell_features[:, 4]
     h = cell_features[:, 5]
 
-    # Pairwise deltas
-    dx = x.unsqueeze(0) - x.unsqueeze(1)  # [N, N]
-    dy = y.unsqueeze(0) - y.unsqueeze(1)  # [N, N]
+    dx = x.unsqueeze(0) - x.unsqueeze(1)
+    dy = y.unsqueeze(0) - y.unsqueeze(1)
+    adx = torch.abs(dx)
+    ady = torch.abs(dy)
 
-    # Overlap in x and y (with small margin)
-    soft_margin = 1.0
-    overlap_x = torch.relu((w.unsqueeze(0) + w.unsqueeze(1)) / 2 + soft_margin - torch.abs(dx))
-    overlap_y = torch.relu((h.unsqueeze(0) + h.unsqueeze(1)) / 2 + soft_margin - torch.abs(dy))
+    # overlap distances
+    min_dx = (w.unsqueeze(0) + w.unsqueeze(1)) * 0.5
+    min_dy = (h.unsqueeze(0) + h.unsqueeze(1)) * 0.5
 
-    # Compute overlap area
-    overlap_area = overlap_x * overlap_y
+    # sharpened penalty (smaller soft_margin, larger beta)
+    soft_margin = 0.5
+    beta = 10.0
 
-    # Mask upper triangle (no double counts)
-    overlap_area = torch.triu(overlap_area, diagonal=1)
+    ovx = F.softplus(min_dx + soft_margin - adx, beta=beta, threshold=20.0)
+    ovy = F.softplus(min_dy + soft_margin - ady, beta=beta, threshold=20.0)
+    overlap_area = ovx * ovy
 
-    # Apply smooth nonlinear scaling to strengthen gradients for small overlaps
-    overlap_area = torch.clamp(overlap_area, min=0.0, max=1e4)
-    overlap_loss = torch.log1p(overlap_area * 0.1).sum()  # log1p for smooth growth
+    # consider only unique pairs (upper triangle)
+    triu_mask = torch.triu(torch.ones_like(overlap_area, dtype=torch.bool), diagonal=1)
+    overlap_area = overlap_area.masked_select(triu_mask)
 
-    # Normalize to avoid explosion but keep scale noticeable
-    loss = overlap_loss / (N * N / 2)
+    # emphasize big overlaps quadratically
+    loss_terms = (overlap_area ** 2)
 
-    return loss
-    # return torch.tensor(1.0, requires_grad=True)
+    # normalize by number of overlapping pairs only (not total pairs)
+    # add epsilon to avoid divide-by-zero
+    return loss_terms.sum() / (loss_terms.numel() + 1e-6)
 
 
 def train_placement(
@@ -395,7 +399,7 @@ def train_placement(
     pin_features,
     edge_list,
     # num_epochs=1000,
-    num_epochs=3000,
+    num_epochs=4000,
     lr=0.01,
     lambda_wirelength=1.0,
     # lambda_overlap=10.0,
@@ -432,6 +436,7 @@ def train_placement(
     # Make only cell positions require gradients
     cell_positions = cell_features[:, 2:4].clone().detach()
     cell_positions.requires_grad_(True)
+    
 
     # Create optimizer
     optimizer = optim.Adam([cell_positions], lr=0.015)
@@ -463,9 +468,14 @@ def train_placement(
         # Combined loss
         # total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
         # Gradually increase overlap repulsion during training
-        lambda_overlap_dynamic = lambda_overlap * (1 + 2 * epoch / num_epochs)
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap_dynamic * overlap_loss
 
+        # lambda_overlap_dynamic = lambda_overlap * (1 + 2 * epoch / num_epochs)
+        # total_loss = lambda_wirelength * wl_loss + lambda_overlap_dynamic * overlap_loss
+
+        t = epoch / num_epochs
+        lambda_overlap_dynamic = lambda_overlap * (1 + 4 * (t ** 3))   # steeper late ramp
+        wire_w = lambda_wirelength * (1 - 0.6 * (t ** 2))               # gently reduce WL weight
+        total_loss = wire_w * wl_loss + lambda_overlap_dynamic * overlap_loss
 
         # Backward pass
         total_loss.backward()
@@ -487,6 +497,52 @@ def train_placement(
             print(f"  Total Loss: {total_loss.item():.6f}")
             print(f"  Wirelength Loss: {wl_loss.item():.6f}")
             print(f"  Overlap Loss: {overlap_loss.item():.6f}")
+
+    # --- Final legalization phase (push apart remaining overlaps) ---
+    legalizer = optim.Adam([cell_positions], lr=0.02)  # calmer LR
+
+    for step in range(600):
+        legalizer.zero_grad()
+        cell_features_current = cell_features.clone()
+        cell_features_current[:, 2:4] = cell_positions
+        # Overlap-only objective to ensure zero overlaps
+        overlap_loss = overlap_repulsion_loss(cell_features_current, pin_features, edge_list)
+        total_loss = 2000.0 * overlap_loss   # pure repulsion; no WL term here
+        total_loss.backward()
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=2.0)
+        legalizer.step()
+
+    print("✅ Gradient legalization (overlap-only) done.")
+
+
+    with torch.no_grad():
+        x = cell_positions[:, 0]
+        y = cell_positions[:, 1]
+        w = cell_features[:, 4]
+        h = cell_features[:, 5]
+        eps = 1e-3  # minimum clearance
+
+        N = x.shape[0]
+        for i in range(N):
+            for j in range(i + 1, N):
+                dx = x[i] - x[j]
+                dy = y[i] - y[j]
+                min_dx = (w[i] + w[j]) / 2.0 + eps
+                min_dy = (h[i] + h[j]) / 2.0 + eps
+
+                if abs(dx) < min_dx and abs(dy) < min_dy:
+                    # push apart just enough to clear
+                    shift_x = (min_dx - abs(dx)) / 2.0 * (1 if dx >= 0 else -1)
+                    shift_y = (min_dy - abs(dy)) / 2.0 * (1 if dy >= 0 else -1)
+                    x[i] += shift_x
+                    y[i] += shift_y
+                    x[j] -= shift_x
+                    y[j] -= shift_y
+
+        cell_positions[:, 0] = x
+        cell_positions[:, 1] = y
+
+    print("🧩 Deterministic nudge finished.")
 
     # Create final cell features
     final_cell_features = cell_features.clone()
