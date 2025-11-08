@@ -25,14 +25,22 @@ Also, if you think there are any bugs in the provided code, feel free to fix the
 
 You may submit multiple solutions to try and increase your score.
 
-We will review submissions on a rolling basis. 
+We will review submissions on a rolling basis.
 
-
-## Leaderboard (sorted by overlap)
+## Leaderboard (sorted by overlap) (OLD; test suite has been updated; see above)
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
- 1    | Shashank Shriram  | 0.0000     | 0.1310          |  11.32      |   🏎️💥               |
+| 1    |   example       | 0.5000      | 0.5             |  10         |   example submission |
+| 2    | Add Yours!      |             |                 |             |                      |
+
+
+
+## Leaderboard (sorted by overlap) (OLD; test suite has been updated; see above)
+
+| Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
+|------|-----------------|-------------|-----------------|-------------|----------------------|
+| 1    | Shashank Shriram  | 0.0000     | 0.1310          |  11.32      |   🏎️💥               |
 | 2    | Brayden Rudisill  | 0.0000    | 0.2611          |   50.51     |   Timed on a mac air |
 | 3    | manuhalapeth      | 0.0000    | 0.2630          |  196.8      |                      |
 | 4    | Neil Teje         | 0.0000    | 0.2700          | 24.00s      |                      |
