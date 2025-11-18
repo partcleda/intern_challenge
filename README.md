@@ -27,7 +27,7 @@ You may submit multiple solutions to try and increase your score.
 
 We will review submissions on a rolling basis.
 
-## Leaderboard (sorted by overlap) (OLD; test suite has been updated; see above)
+## New Leaderboard (sorted by overlap)
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
