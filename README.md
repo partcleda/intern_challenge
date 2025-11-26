@@ -102,6 +102,23 @@ Normalized Wirelength: 0.4797
 
 An optional CUDA backend accelerates the overlap loss for large designs.
 
+### Profiling and Debug Flags
+
+Flags in `placement.py` let you control profiling and backend selection at runtime:
+
+- `PROFILE_PLACEMENT`  
+  Enables overall placement and optimization profiling. Set with environment variable `PROFILE_PLACEMENT=1`.
+- `PROFILE_OVERLAP`  
+  Enables profiling specifically for the overlap loss computation. It is enabled if either `PROFILE_PLACEMENT` or `PROFILE_OVERLAP` is set.
+- `DEBUG_CUDA_OVERLAP`  
+  Prints extra debugging info about CUDA overlap loss (if using CUDA backend). Set with `CUDA_OVERLAP_DEBUG=1`.
+- `FORCE_CPU_OVERLAP`  
+  Forces overlap computation to use the PyTorch (CPU) implementation instead of CUDA, even if CUDA is available. Set with `FORCE_CPU_OVERLAP=1`.
+
+Set these flags as environment variables before running scripts (e.g., `PROFILE_OVERLAP=1 python test.py`).
+
+---
+
 1. Create/activate the provided environment (or your own):
    ```bash
    python -m venv partcl
