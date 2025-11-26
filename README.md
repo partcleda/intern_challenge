@@ -69,3 +69,30 @@ We will review submissions on a rolling basis.
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.
 
 Good luck!
+
+
+---
+
+## Results Summary (Temporary)
+
+**test.py (First 10 Test Cases, run on NVIDIA GeForce RTX 3060):**
+```
+Average Overlap:      0.0000
+Average Wirelength:   0.6040
+Total Runtime:        118.79s
+```
+
+**placement.py Output (Leaderboard Metrics, Example Test Case):**
+```
+Overlap Ratio:        0.0000 (0/53 cells)
+Normalized Wirelength: 0.4797
+```
+
+**Notes:**  
+- Overlap loss optimized for small, medium, and large designs  
+- CUDA OOM errors for the largest "realistic" test cases  
+- Minor changes to success_criteria (see `SUCCESS_CRITERIA_IMPROVEMENT.md`)  
+- Wirelength is not fully optimized (work in progress)
+
+**TODO:**  
+- Optimize O(N²) overlap loss calculation for better scalability

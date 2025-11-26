@@ -5,3 +5,6 @@
 *.bmp
 
 **/__pycache__/**
+
+#my venv for running the code
+/partcl
