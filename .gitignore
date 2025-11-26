@@ -8,3 +8,11 @@
 
 #my venv for running the code
 /partcl
+
+# CUDA build artifacts
+/build/
+**/*.egg-info/
+*.so
+*.pyd
+cuda_backend/build/
+cuda_backend/*.so

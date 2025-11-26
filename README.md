@@ -75,24 +75,42 @@ Good luck!
 
 ## Results Summary (Temporary)
 
-**test.py (First 10 Test Cases, run on NVIDIA GeForce RTX 3060):**
+**test.py (11th Test Cases, run on NVIDIA GeForce RTX 3060): (UNCHANGED for now)**
 ```
 Average Overlap:      0.0000
-Average Wirelength:   0.6040
-Total Runtime:        118.79s
+Average Wirelength:   0.6554
+Total Runtime:        243.50s
 ```
 
-**placement.py Output (Leaderboard Metrics, Example Test Case):**
+**placement.py Output (Leaderboard Metrics, Example Test Case): (UNCHANGED from last commit)** 
 ```
 Overlap Ratio:        0.0000 (0/53 cells)
 Normalized Wirelength: 0.4797
 ```
 
 **Notes:**  
-- Overlap loss optimized for small, medium, and large designs  
-- CUDA OOM errors for the largest "realistic" test cases  
-- Minor changes to success_criteria (see `SUCCESS_CRITERIA_IMPROVEMENT.md`)  
-- Wirelength is not fully optimized (work in progress)
+- Optimized the loss function for performance.
+- Added a CUDA backend to accelerate the overlap loss calculation—currently testing to see if this provides sufficient speedup for large benchmarks.
 
 **TODO:**  
-- Optimize O(N²) overlap loss calculation for better scalability
+- Further optimize the largest test case to ensure it runs within reasonable time/memory limits.
+- Evaluate CUDA backend performance; profile and tune overlap calculation as needed.
+- Investigate any remaining bottlenecks or memory issues for large N.
+- Document results and update leaderboard accordingly.
+
+## CUDA Backend Setup
+
+An optional CUDA backend accelerates the overlap loss for large designs.
+
+1. Create/activate the provided environment (or your own):
+   ```bash
+   python -m venv partcl
+   source partcl/bin/activate
+   pip install -r requirements.txt
+   ```
+2. Build the extension from the repository root:
+   ```bash
+   python cuda_backend/setup_cuda.py build_ext --inplace
+   ```
+3. Run the usual scripts (e.g., `python test.py`).  
+   If CUDA is available, the overlap loss automatically switches to the compiled backend; otherwise it falls back to the PyTorch implementation.

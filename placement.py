@@ -40,11 +40,39 @@ BONUS CHALLENGES:
 
 import os
 import math
+import time
 from enum import IntEnum
 
 import torch
 import torch.optim as optim
 import torch.nn as nn
+
+# Profiling / debug flags (enable via environment variables)
+PROFILE_PLACEMENT = bool(int(os.environ.get("PROFILE_PLACEMENT", "0")))
+PROFILE_OVERLAP = PROFILE_PLACEMENT or bool(int(os.environ.get("PROFILE_OVERLAP", "0")))
+DEBUG_CUDA_OVERLAP = bool(int(os.environ.get("CUDA_OVERLAP_DEBUG", "0")))
+FORCE_CPU_OVERLAP = bool(int(os.environ.get("FORCE_CPU_OVERLAP", "0")))
+LAST_OVERLAP_PROFILE = {}
+
+# Try to import CUDA-accelerated overlap loss (falls back to PyTorch implementation if unavailable)
+try:
+    from cuda_backend import (
+        compute_overlap_loss as cuda_overlap_loss,
+        is_available as cuda_overlap_available,
+        get_last_stats as cuda_overlap_stats,
+    )
+    CUDA_OVERLAP_AVAILABLE = cuda_overlap_available()
+except ImportError:
+    cuda_overlap_loss = None
+    cuda_overlap_stats = lambda: {}
+    CUDA_OVERLAP_AVAILABLE = False
+
+
+def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch_progress=1.0):
+    """Main entry point for overlap loss."""
+    return overlap_repulsion_loss_original(
+        cell_features, pin_features, edge_list, epoch_progress
+    )
 
 
 # Feature index enums for cleaner code access
@@ -444,7 +472,7 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
 
-def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch_progress=1.0):
+def overlap_repulsion_loss_original(cell_features, pin_features, edge_list, epoch_progress=1.0):
     """Calculate overlap loss using optimized GPU-friendly vectorized computation.
     
     Uses spatial filtering for large problems to skip distant pairs, but processes
@@ -472,6 +500,14 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch_progres
         return torch.tensor(0.0, device=cell_features.device, requires_grad=True)
 
     device = cell_features.device
+    global LAST_OVERLAP_PROFILE
+    if PROFILE_OVERLAP:
+        torch.cuda.synchronize() if device.type == "cuda" else None
+        overlap_prof_start = time.perf_counter()
+        overlap_host_time = 0.0
+        overlap_kernel_time = 0.0
+    else:
+        overlap_prof_start = None
     
     # Extract positions, dimensions, and areas
     x = cell_features[:, CellFeatureIdx.X]  # [N]
@@ -506,6 +542,52 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch_progres
     # Higher alpha = stronger gradients for larger overlaps (more aggressive)
     # Start moderate, increase aggressively over time
     alpha = 3.0 + 12.0 * epoch_progress  # 3.0 -> 15.0 (more aggressive over time)
+    
+    # Fast CUDA path (only when extension is available and tensors are on GPU)
+    if CUDA_OVERLAP_AVAILABLE and device.type == "cuda" and not FORCE_CPU_OVERLAP:
+        try:
+            if PROFILE_OVERLAP:
+                host_prep_end = time.perf_counter()
+                overlap_host_time = host_prep_end - overlap_prof_start
+                torch.cuda.synchronize()
+                kernel_start = time.perf_counter()
+                loss = cuda_overlap_loss(
+                    cell_features,
+                    margin_factor,
+                    alpha,
+                    scale,
+                    epoch_progress,
+                )
+                torch.cuda.synchronize()
+                overlap_kernel_time = time.perf_counter() - kernel_start
+                LAST_OVERLAP_PROFILE = {
+                    "backend": "cuda",
+                    "host": overlap_host_time,
+                    "kernel": overlap_kernel_time,
+                }
+            else:
+                loss = cuda_overlap_loss(
+                    cell_features,
+                    margin_factor,
+                    alpha,
+                    scale,
+                    epoch_progress,
+                )
+                LAST_OVERLAP_PROFILE = {"backend": "cuda", "host": 0.0, "kernel": 0.0}
+            if DEBUG_CUDA_OVERLAP:
+                stats = cuda_overlap_stats()
+                print(
+                    f"[CUDA-OVERLAP] backend used "
+                    f"(pairs={stats.get('pairs')}, bin_size={stats.get('bin_size', 0.0):.3f})"
+                )
+            return loss
+        except RuntimeError as exc:
+            # Fall back to PyTorch implementation on failure
+            if DEBUG_CUDA_OVERLAP:
+                print(f"[CUDA-OVERLAP] fallback to CPU due to: {exc}")
+            pass
+    elif DEBUG_CUDA_OVERLAP and FORCE_CPU_OVERLAP:
+        print("[CUDA-OVERLAP] FORCE_CPU_OVERLAP=1 -> using PyTorch implementation")
     
     # Simplified, optimized approach: Minimize overhead, maximize GPU utilization
     # Key strategy: Use larger chunks, simpler operations, aggressive spatial filtering
@@ -692,6 +774,15 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch_progres
         if not torch.isfinite(total_penalty):
             total_penalty = torch.tensor(0.0, device=device, dtype=torch.float32, requires_grad=True)
         
+        if PROFILE_OVERLAP and overlap_prof_start is not None:
+            torch.cuda.synchronize() if device.type == "cuda" else None
+            LAST_OVERLAP_PROFILE = {
+                "backend": "cpu",
+                "host": time.perf_counter() - overlap_prof_start,
+                "kernel": 0.0,
+            }
+        else:
+            LAST_OVERLAP_PROFILE = None
         return total_penalty
     
     elif USE_CHUNKING:
@@ -953,6 +1044,15 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch_progres
         if not torch.isfinite(total_penalty):
             total_penalty = torch.tensor(0.0, device=device, dtype=torch.float32, requires_grad=True)
         
+        if PROFILE_OVERLAP and overlap_prof_start is not None:
+            torch.cuda.synchronize() if device.type == "cuda" else None
+            LAST_OVERLAP_PROFILE = {
+                "backend": "cpu",
+                "host": time.perf_counter() - overlap_prof_start,
+                "kernel": 0.0,
+            }
+        else:
+            LAST_OVERLAP_PROFILE = None
         return total_penalty
     
     else:
@@ -1012,6 +1112,15 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch_progres
         if not torch.isfinite(total_penalty):
             total_penalty = torch.tensor(0.0, device=device, dtype=torch.float32, requires_grad=True)
         
+        if PROFILE_OVERLAP and overlap_prof_start is not None:
+            torch.cuda.synchronize() if device.type == "cuda" else None
+            LAST_OVERLAP_PROFILE = {
+                "backend": "cpu",
+                "host": time.perf_counter() - overlap_prof_start,
+                "kernel": 0.0,
+            }
+        else:
+            LAST_OVERLAP_PROFILE = None
         return total_penalty
 
 
@@ -1140,6 +1249,9 @@ def train_placement(
     # Training loop with adaptive learning rate and overlap weighting
     for epoch in range(num_epochs):
         epoch_progress = epoch / num_epochs
+        if PROFILE_PLACEMENT:
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            epoch_start = time.perf_counter()
         
         # Base cosine annealing: smooth decay from scaled_lr to scaled_lr/3
         lr_min = scaled_lr * (0.3 if N > 2000 else 0.5)
@@ -1175,19 +1287,37 @@ def train_placement(
         # Use torch.amp for automatic mixed precision (faster, lower memory)
         # Only use mixed precision for large problems to avoid overhead
         use_amp = torch.cuda.is_available() and device.type == 'cuda' and N > 1000
+        if PROFILE_PLACEMENT:
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            wl_timer_start = time.perf_counter()
         with torch.amp.autocast('cuda', enabled=use_amp):
             wl_loss = wirelength_attraction_loss(
                 cell_features_current, pin_features, edge_list
             )
-            overlap_loss = overlap_repulsion_loss(
-                cell_features_current, pin_features, edge_list, epoch_progress
-            )
+        if PROFILE_PLACEMENT:
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            wl_time = time.perf_counter() - wl_timer_start
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            overlap_timer_start = time.perf_counter()
+        overlap_loss = overlap_repulsion_loss(
+            cell_features_current, pin_features, edge_list, epoch_progress
+        )
+        if PROFILE_PLACEMENT:
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            ol_time = time.perf_counter() - overlap_timer_start
+            overlap_host = LAST_OVERLAP_PROFILE.get("host", 0.0) if LAST_OVERLAP_PROFILE else 0.0
+            overlap_kernel = LAST_OVERLAP_PROFILE.get("kernel", 0.0) if LAST_OVERLAP_PROFILE else 0.0
 
         # Combined loss with adaptive lambda
         total_loss = lambda_wirelength * wl_loss + current_lambda_overlap * overlap_loss
         
         # Check for NaN/Inf before backward pass
         should_skip_update = False
+        backward_time = 0.0
+        backward_start = None
+        if PROFILE_PLACEMENT:
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            backward_start = time.perf_counter()
         if not torch.isfinite(total_loss):
             if verbose and epoch % log_interval == 0:
                 print(f"WARNING: NaN/Inf detected in total_loss at epoch {epoch}")
@@ -1225,6 +1355,9 @@ def train_placement(
             # Still record losses (as NaN) for debugging, but don't update positions
             # Zero gradients to prevent accumulation
             optimizer.zero_grad()
+        if PROFILE_PLACEMENT and backward_start is not None:
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            backward_time = time.perf_counter() - backward_start
 
         # Record losses (may be NaN, but that's useful for debugging)
         total_loss_val = total_loss.item() if torch.isfinite(total_loss) else float('nan')
@@ -1265,13 +1398,22 @@ def train_placement(
                 best_overlap_loss = ol_loss_val
                 plateau_count = 0
 
-        # Log progress
+        # Log progress / profiling
         if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
             print(f"Epoch {epoch}/{num_epochs} (progress: {epoch_progress:.2f}):")
             print(f"  LR: {current_lr:.4f} (×{current_lr_multiplier:.2f}), λ_overlap: {current_lambda_overlap:.2f}")
             print(f"  Total Loss: {total_loss_val:.6f}")
             print(f"  Wirelength Loss: {wl_loss_val:.6f}")
             print(f"  Overlap Loss: {ol_loss_val:.6f}")
+        if PROFILE_PLACEMENT:
+            torch.cuda.synchronize() if device.type == 'cuda' else None
+            epoch_time = time.perf_counter() - epoch_start if 'epoch_start' in locals() else 0.0
+            print(
+                f"[PROFILE] epoch {epoch}: "
+                f"wl={wl_time:.3f}s overlap={ol_time:.3f}s "
+                f"(host {overlap_host:.3f}s kernel {overlap_kernel:.3f}s) "
+                f"backward={backward_time:.3f}s total={epoch_time:.3f}s"
+            )
 
     # Create final cell features
     final_cell_features = cell_features.clone()
