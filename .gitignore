@@ -1,7 +1,23 @@
-*.png
+# *.png
 *.jpg
 *.jpeg
 *.gif
 *.bmp
 
-**/__pycache__/**
+**/__pycache__/
+
+#my venv for running the code
+/partcl
+/images/
+
+# CUDA build artifacts
+/build/
+**/*.egg-info/
+*.so
+*.pyd
+cuda_backend/build/
+cuda_backend/*.so
+hyperparameter_search/
+
+# Old files and CUDA backend
+placement_old.py

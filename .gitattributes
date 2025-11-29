@@ -1,0 +1,15 @@
+# Explicitly mark C++ and CUDA files for GitHub language statistics
+*.cpp linguist-language=C++
+*.cu linguist-language=CUDA
+*.cuh linguist-language=CUDA
+
+# Ensure CUDA backend files are counted (not marked as generated or vendored)
+cuda_backend/overlap_cuda.cpp linguist-language=C++ linguist-detectable=true
+cuda_backend/overlap_cuda_kernel.cu linguist-language=CUDA linguist-detectable=true
+
+# Exclude build artifacts and generated files from language stats
+build/** linguist-vendored=true
+*.so linguist-generated=true
+*.o linguist-generated=true
+__pycache__/** linguist-vendored=true
+partcl/** linguist-vendored=true
