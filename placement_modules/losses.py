@@ -555,37 +555,37 @@ def overlap_repulsion_loss_original(cell_features, pin_features, edge_list, epoc
                     i_chunk_end = min(i_chunk_start + CHUNK_SIZE_I, len(bin_cell_indices))
                     i_chunk = bin_cell_indices[i_chunk_start:i_chunk_end]
                 
-                    for j_chunk_start in range(0, len(neighbor_indices), CHUNK_SIZE_J):
-                        j_chunk_end = min(j_chunk_start + CHUNK_SIZE_J, len(neighbor_indices))
-                        j_chunk = neighbor_indices[j_chunk_start:j_chunk_end]
-                        
-                        # Ensure j > i (upper triangle)
-                        i_broadcast = i_chunk.unsqueeze(1)
-                        j_broadcast = j_chunk.unsqueeze(0)
-                        valid_mask = j_broadcast > i_broadcast
-                        
-                        if not valid_mask.any():
-                            continue
-                        
-                        # Get cell data
-                        xi = x[i_chunk].unsqueeze(1)
-                        yi = y[i_chunk].unsqueeze(1)
-                        wi = w[i_chunk].unsqueeze(1)
-                        hi = h[i_chunk].unsqueeze(1)
-                        areai = area[i_chunk].unsqueeze(1)
-                        
-                        xj = x[j_chunk].unsqueeze(0)
-                        yj = y[j_chunk].unsqueeze(0)
-                        wj = w[j_chunk].unsqueeze(0)
-                        hj = h[j_chunk].unsqueeze(0)
-                        areaj = area[j_chunk].unsqueeze(0)
-                        
-                        # Use optimized fused overlap computation (compiled for speed)
-                        chunk_penalty = _compute_overlap_chunk_fused(
-                            xi, yi, wi, hi, areai,
-                            xj, yj, wj, hj, areaj,
-                            margin_factor, scale, alpha, valid_mask
-                        )
+                for j_chunk_start in range(0, len(neighbor_indices), CHUNK_SIZE_J):
+                    j_chunk_end = min(j_chunk_start + CHUNK_SIZE_J, len(neighbor_indices))
+                    j_chunk = neighbor_indices[j_chunk_start:j_chunk_end]
+                    
+                    # Ensure j > i (upper triangle)
+                    i_broadcast = i_chunk.unsqueeze(1)
+                    j_broadcast = j_chunk.unsqueeze(0)
+                    valid_mask = j_broadcast > i_broadcast
+                    
+                    if not valid_mask.any():
+                        continue
+                    
+                    # Get cell data
+                    xi = x[i_chunk].unsqueeze(1)
+                    yi = y[i_chunk].unsqueeze(1)
+                    wi = w[i_chunk].unsqueeze(1)
+                    hi = h[i_chunk].unsqueeze(1)
+                    areai = area[i_chunk].unsqueeze(1)
+                    
+                    xj = x[j_chunk].unsqueeze(0)
+                    yj = y[j_chunk].unsqueeze(0)
+                    wj = w[j_chunk].unsqueeze(0)
+                    hj = h[j_chunk].unsqueeze(0)
+                    areaj = area[j_chunk].unsqueeze(0)
+                    
+                    # Use optimized fused overlap computation (compiled for speed)
+                    chunk_penalty = _compute_overlap_chunk_fused(
+                        xi, yi, wi, hi, areai,
+                        xj, yj, wj, hj, areaj,
+                        margin_factor, scale, alpha, valid_mask
+                    )
                     # Convert to float32 if needed and check for NaN/Inf
                     if chunk_penalty.dtype != torch.float32:
                         chunk_penalty = chunk_penalty.float()
