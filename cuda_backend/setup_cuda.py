@@ -1,5 +1,14 @@
+"""Build script for CUDA overlap computation extension.
+
+Compiles overlap_cuda.cpp and overlap_cuda_kernel.cu into a PyTorch extension module.
+"""
+import os
+from pathlib import Path
 from setuptools import setup
 from torch.utils.cpp_extension import BuildExtension, CUDAExtension
+
+# Get the directory where this script is located
+script_dir = Path(__file__).parent.absolute()
 
 setup(
     name="overlap_cuda_backend",
@@ -7,8 +16,8 @@ setup(
         CUDAExtension(
             name="overlap_cuda_backend",
             sources=[
-                "cuda_backend/overlap_cuda.cpp",
-                "cuda_backend/overlap_cuda_kernel.cu",
+                str(script_dir / "overlap_cuda.cpp"),
+                str(script_dir / "overlap_cuda_kernel.cu"),
             ],
             extra_compile_args={
                 "cxx": ["-O3"],

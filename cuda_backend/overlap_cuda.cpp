@@ -1,5 +1,7 @@
 #include <torch/extension.h>
 
+// C++ wrapper for CUDA kernels
+// Provides PyTorch tensor interface to CUDA overlap computation kernels
 // Forward/backward declarations implemented in overlap_cuda_kernel.cu
 
 torch::Tensor overlap_forward_cuda(
@@ -54,7 +56,7 @@ torch::Tensor overlap_forward(
     double alpha,
     double scale) {
   TORCH_CHECK(positions.is_cuda(), "positions must be a CUDA tensor");
-  return overlap_forward_cuda(
+  auto result = overlap_forward_cuda(
       positions,
       widths,
       heights,
@@ -70,6 +72,7 @@ torch::Tensor overlap_forward(
       margin_factor,
       alpha,
       scale);
+  return result;
 }
 
 
