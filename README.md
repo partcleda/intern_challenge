@@ -27,6 +27,38 @@ You may submit multiple solutions to try and increase your score.
 
 We will review submissions on a rolling basis.
 
+---
+
+## BALA Submission
+
+I reorganized the original codebase from [partcleda/intern_challenge](https://github.com/partcleda/intern_challenge) into a modular structure because the original `placement.py` file would have become too large. Below is the structure:
+
+```
+intern_challenge/
+├── placement.py              # Main entry point
+├── test.py                   # Test suite
+├── placement_modules/        # Modular components
+│   ├── __init__.py
+│   ├── utils.py             # Shared enums, constants, and utilities
+│   ├── losses.py            # Wirelength and overlap loss functions
+│   ├── training.py          # Training loop with adaptive hyperparameters
+│   ├── metrics.py           # Evaluation metrics (overlap, wirelength)
+│   ├── visualization.py     # Plotting functions
+│   ├── surrogate_gradients.py  # Surrogate gradient functions for optimization
+│   ├── cuda_setup.py        # CUDA backend setup and checking
+│   └── SUCCESS_CRITERIA_IMPROVEMENT.md  # Success criteria validation improvements
+└── cuda_backend/            # CUDA-accelerated overlap computation
+    ├── __init__.py
+    ├── setup_cuda.py        # Build script for CUDA extension
+    ├── overlap_cuda.py      # Python wrapper for CUDA kernels
+    ├── overlap_cuda.cpp     # C++ wrapper binding CUDA kernels to PyTorch
+    └── overlap_cuda_kernel.cu  # CUDA kernels for forward/backward overlap computation
+```
+
+Training results, including loss history plots, learning rate schedules, and GPU utilization plots, are documented in the `results/` folder. See `CHANGES.md` for detailed technical documentation.
+
+---
+
 ## New Leaderboard (sorted by overlap)
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
@@ -69,72 +101,3 @@ We will review submissions on a rolling basis.
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.
 
 Good luck!
-
-
----
-
-## Code Organization
-
-The codebase has been refactored into a modular structure for better maintainability. The original monolithic `placement.py` (2372 lines) has been split into logical components.
-
-### Directory Structure
-
-```
-intern_challenge/
-├── placement.py              # Main entry point
-├── test.py                   # Test suite
-├── placement_modules/        # Modular components
-│   ├── __init__.py
-│   ├── utils.py             # Shared enums, constants, and utilities
-│   ├── losses.py            # Wirelength and overlap loss functions
-│   ├── training.py          # Training loop with adaptive hyperparameters (2500 epochs for 100k+ cells)
-│   ├── metrics.py           # Evaluation metrics (overlap, wirelength)
-│   ├── visualization.py     # Plotting functions
-│   ├── surrogate_gradients.py  # Surrogate gradient functions for optimization
-│   ├── cuda_setup.py        # CUDA backend setup and checking
-│   ├── README.md            # Detailed module documentation
-│   └── SUCCESS_CRITERIA_IMPROVEMENT.md  # Success criteria validation improvements
-└── cuda_backend/            # CUDA-accelerated overlap computation
-    ├── __init__.py
-    ├── setup_cuda.py        # Build script for CUDA extension
-    ├── overlap_cuda.py      # Python wrapper for CUDA kernels
-    ├── overlap_cuda.cpp     # C++ wrapper binding CUDA kernels to PyTorch
-    └── overlap_cuda_kernel.cu  # CUDA kernels for forward/backward overlap computation
-```
-
-### Module Overview
-
-- **`placement.py`**: Main entry point containing `generate_placement_input()` and `main()` functions
-- **`placement_modules/utils.py`**: Shared utilities (enums, constants, debug flags)
-- **`placement_modules/losses.py`**: Core loss functions for wirelength and overlap computation
-- **`placement_modules/training.py`**: Training loop with adaptive learning rate and penalty scheduling (2500 epochs for 100k+ cells)
-- **`placement_modules/metrics.py`**: Evaluation functions for overlap and wirelength metrics
-- **`placement_modules/visualization.py`**: Visualization of placement results and loss history
-- **`placement_modules/surrogate_gradients.py`**: Custom gradient functions for optimization
-- **`placement_modules/cuda_setup.py`**: CUDA backend availability checking
-
-### CUDA Backend
-
-The `cuda_backend/` folder contains CUDA-accelerated overlap computation for improved performance on large designs (50k+ cells):
-
-- **`setup_cuda.py`**: Build script that compiles CUDA extension using PyTorch's JIT compilation
-- **`overlap_cuda.py`**: Python wrapper providing PyTorch-compatible interface to CUDA kernels
-- **`overlap_cuda.cpp`**: C++ wrapper that binds CUDA kernels to PyTorch tensors and handles memory management
-- **`overlap_cuda_kernel.cu`**: CUDA kernels implementing forward and backward passes for overlap loss computation with spatial hashing and grid-stride loops
-
-The CUDA backend provides 2-3x speedup over PyTorch operations for large problems and is automatically used when available.
-
-See `placement_modules/README.md` for detailed documentation on each module.
-
-### Benefits
-
-- **Maintainability**: Each module has a single, clear responsibility
-- **Readability**: Smaller files are easier to understand and navigate
-- **Testability**: Individual modules can be tested in isolation
-- **Reusability**: Modules can be imported and used independently
-
----
-
-## Results
-
-Training results, including loss history plots and learning rate schedules, are documented in the `/results` folder.

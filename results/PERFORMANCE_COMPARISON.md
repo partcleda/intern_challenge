@@ -34,11 +34,11 @@
 ### GPU Utilization - Test ID 11
 
 #### With Custom CUDA Backend
-![CUDA Backend - Test ID 11](gpu_util_cuda_test11.png)
+![CUDA Backend - Test ID 11](gpu_util/gpu_util_cuda_test11.png)
 *My custom CUDA backend achieves **96% GPU utilization** (vs 55-56% with PyTorch), demonstrating superior resource utilization. Despite higher utilization, memory usage remains efficient (631 MiB, 1.3%). The operation is computation-bound with low memory bandwidth (2%), indicating my CUDA kernels are efficiently using compute resources. Power usage: 177W (59% of limit) - higher power reflects the increased computational throughput.*
 
 #### With PyTorch GPU (No Optimization)
-![PyTorch GPU - Test ID 11](gpu_util_pytorch_test11.png)
+![PyTorch GPU - Test ID 11](gpu_util/gpu_util_pytorch_test11.png)
 *PyTorch GPU operations achieve only **55-56% GPU utilization**, leaving significant GPU resources unused. Lower memory usage (332 MiB) but this reflects less efficient parallelization. The lower power usage (~99W, 33% of limit) indicates the GPU is not being fully utilized, contributing to the 200-267x slower performance compared to my custom CUDA backend.*
 
 ---
@@ -62,11 +62,11 @@
 ### GPU Utilization - Test ID 12
 
 #### With Custom CUDA Backend
-![CUDA Backend - Test ID 12](gpu_util_cuda_test12.png)
+![CUDA Backend - Test ID 12](gpu_util/gpu_util_cuda_test12.png)
 *My custom CUDA backend achieves **96-97% GPU utilization** with **100% memory bandwidth utilization**, demonstrating that my kernels efficiently saturate both compute and memory resources for large problems. Memory usage (13.3 GiB, 27.1%) is well within limits, and the high power usage (253W, 84% of limit) reflects the intensive computation enabled by my optimized CUDA implementation. This efficient resource utilization enables the 13.5-15x speedup over PyTorch.*
 
 #### With PyTorch GPU (No Optimization)
-![PyTorch GPU - Test ID 12](gpu_util_pytorch_test12.png)
+![PyTorch GPU - Test ID 12](gpu_util/gpu_util_pytorch_test12.png)
 *PyTorch GPU operations achieve only **88% GPU utilization** (vs 96-97% with my CUDA backend) and **95% memory bandwidth** (vs 100%), leaving resources underutilized. Despite using **nearly twice the memory** (24.37 GiB, 50.8% vs 13.3 GiB, 27.1%), PyTorch achieves lower SM utilization (67% vs 97%), indicating inefficient memory access patterns and less effective parallelization. The lower power usage (133W, 44% of limit vs 253W, 84%) reflects the GPU not being fully utilized, directly contributing to the **13.5-15x slower performance** compared to my custom CUDA backend. My CUDA backend is both faster AND more memory-efficient.*
 
 ---
