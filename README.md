@@ -32,7 +32,8 @@ We will review submissions on a rolling basis.
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
 | 1    |   example       | 0.5000      | 0.5             |  10         |   example submission |
-| 2    | Add Yours!      |             |                 |             |                      |
+| 2    | **Vrajgiri Gosai** | **0.0000**  | **0.5224**      | **7477s**   | **0 overlaps! Built a custom spiral legalizer to fix the hard cases.** |
+| 3    | Add Yours!      |             |                 |             |                      |
 
 
 
