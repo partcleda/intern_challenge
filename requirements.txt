@@ -1,0 +1,5 @@
+# Core runtime
+torch>=2.0
+
+# CUDA extension build tools
+ninja>=1.10
