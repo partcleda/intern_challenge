@@ -43,6 +43,9 @@ from enum import IntEnum
 
 import torch
 import torch.optim as optim
+import math
+import random
+import numpy as np
 
 
 # Feature index enums for cleaner code access
@@ -299,163 +302,444 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
 
-def overlap_repulsion_loss(cell_features, pin_features, edge_list):
-    """Calculate loss to prevent cell overlaps.
-
-    TODO: IMPLEMENT THIS FUNCTION
-
-    This is the main challenge. You need to implement a differentiable loss function
-    that penalizes overlapping cells. The loss should:
-
-    1. Be zero when no cells overlap
-    2. Increase as overlap area increases
-    3. Use only differentiable PyTorch operations (no if statements on tensors)
-    4. Work efficiently with vectorized operations
-
-    HINTS:
-    - Two axis-aligned rectangles overlap if they overlap in BOTH x and y dimensions
-    - For rectangles centered at (x1, y1) and (x2, y2) with widths (w1, w2) and heights (h1, h2):
-      * x-overlap occurs when |x1 - x2| < (w1 + w2) / 2
-      * y-overlap occurs when |y1 - y2| < (h1 + h2) / 2
-    - Use torch.relu() to compute positive overlaps: overlap_x = relu((w1+w2)/2 - |x1-x2|)
-    - Overlap area = overlap_x * overlap_y
-    - Consider all pairs of cells: use broadcasting with unsqueeze
-    - Use torch.triu() to avoid counting each pair twice (only consider i < j)
-    - Normalize the loss appropriately (by number of pairs or total area)
-
-    RECOMMENDED APPROACH:
-    1. Extract positions, widths, heights from cell_features
-    2. Compute all pairwise distances using broadcasting:
-       positions_i = positions.unsqueeze(1)  # [N, 1, 2]
-       positions_j = positions.unsqueeze(0)  # [1, N, 2]
-       distances = positions_i - positions_j  # [N, N, 2]
-    3. Calculate minimum separation distances for each pair
-    4. Use relu to get positive overlap amounts
-    5. Multiply overlaps in x and y to get overlap areas
-    6. Mask to only consider upper triangle (i < j)
-    7. Sum and normalize
-
-    Args:
-        cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
-        pin_features: [P, 7] tensor with pin information (not used here)
-        edge_list: [E, 2] tensor with edges (not used here)
-
-    Returns:
-        Scalar loss value (should be 0 when no overlaps exist)
+def overlap_repulsion_loss(cell_features, pin_features, edge_list, inflation_factor=1.0):
+    """
+    Calculates overlap loss by checking every cell against every other cell.
+    
+    Strategy:
+    1. Check all pairs (N*N).
+    2. If they overlap, penalize the square of the overlap area.
+    3. This pushes cells apart.
     """
     N = cell_features.shape[0]
+    device = cell_features.device
     if N <= 1:
-        return torch.tensor(0.0, requires_grad=True)
+        return torch.tensor(0.0, requires_grad=True, device=device)
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    positions = cell_features[:, 2:4]
+    widths = cell_features[:, 4] * inflation_factor
+    heights = cell_features[:, 5] * inflation_factor
+    
+    # Calculate pairwise distances
+    # Since N is small (<2500), we can afford to check every single pair (O(N^2)).
+    # This gives the most accurate gradient.
+    
+    # x_diff[i, j] = x[i] - x[j]
+    x = positions[:, 0]
+    y = positions[:, 1]
+    
+    x_diff = x.unsqueeze(1) - x.unsqueeze(0)
+    y_diff = y.unsqueeze(1) - y.unsqueeze(0)
+    
+    x_dist = torch.abs(x_diff)
+    y_dist = torch.abs(y_diff)
+    
+    # Minimum separation required to avoid overlap
+    w_sum = widths.unsqueeze(1) + widths.unsqueeze(0)
+    h_sum = heights.unsqueeze(1) + heights.unsqueeze(0)
+    
+    min_sep_x = w_sum / 2.0
+    min_sep_y = h_sum / 2.0
+    
+    # Overlap amount (positive if overlapping, 0 otherwise)
+    overlap_w = torch.relu(min_sep_x - x_dist)
+    overlap_h = torch.relu(min_sep_y - y_dist)
+    
+    # Overlap area
+    overlap_area = overlap_w * overlap_h
+    
+    # Penalize overlap strongly
+    # Using squared overlap area creates stronger gradients for large overlaps
+    # Adding a linear term ensures gradients for small overlaps don't vanish
+    loss_matrix = overlap_area ** 2 + overlap_area * 100.0
+    
+    # only count upper triangle to avoid double counting, and exclude diagonal
+    mask = torch.triu(torch.ones(N, N, device=device), diagonal=1)
+    
+    total_loss = torch.sum(loss_matrix * mask)
+    
+    return total_loss
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
 
+def grid_density_loss(cell_features, grid_resolution=64):
+    """Calculate density overflow loss using Separable Axes (X and Y projections)."""
+    N = cell_features.shape[0]
+    if N == 0:
+        return torch.tensor(0.0, requires_grad=True, device=cell_features.device)
+
+    # Fixed Canvas
+    CANVAS_SIZE = 1000.0
+    bin_size = CANVAS_SIZE / grid_resolution
+    
+    # 1D Projection Data
+    cx = cell_features[:, 2].unsqueeze(1)
+    cy = cell_features[:, 3].unsqueeze(1)
+    w = cell_features[:, 4].unsqueeze(1)
+    h = cell_features[:, 5].unsqueeze(1)
+    
+    # Bin Centers [1, R]
+    bin_centers = torch.linspace(bin_size/2, CANVAS_SIZE - bin_size/2, grid_resolution, device=cell_features.device).unsqueeze(0)
+    bin_L = bin_centers - bin_size/2
+    bin_R = bin_centers + bin_size/2
+    
+    # X Density
+    cell_L = cx - w/2
+    cell_R = cx + w/2
+    overlap_x = torch.relu(torch.min(cell_R, bin_R) - torch.max(cell_L, bin_L))
+    density_x = torch.sum(overlap_x, dim=0)
+
+    # Y Density
+    cell_B = cy - h/2
+    cell_T = cy + h/2
+    overlap_y = torch.relu(torch.min(cell_T, bin_R) - torch.max(cell_B, bin_L))
+    density_y = torch.sum(overlap_y, dim=0)
+    
+    # Target (Physical Capacity)
+    # Allow density up to the physical width of the bin (100% utilization)
+    # This allows clustering (good for WL) while preventing overflow
+    target_x = bin_size * 1.0
+    target_y = bin_size * 1.0
+    
+    overflow_x = torch.relu(density_x - target_x)
+    overflow_y = torch.relu(density_y - target_y)
+    
+    return torch.mean(overflow_x**2) + torch.mean(overflow_y**2)
+
+
+def legalize_placement(cell_features):
+    """
+    Projects cells to legal non-overlapping positions on a discrete grid.
+
+    This function implements a Hybrid Legalization Strategy:
+    1.  **Sorting**: Processes Macros (large cells) first, then Standard Cells.
+    2.  **Vectorized Spiral Search**: Checks thousands of local candidate positions efficiently using NumPy vectorization.
+    3.  **SAT Fallback**: If local search fails, uses a Summed Area Table (Integral Image) to find the nearest valid spot globally in O(1) per region check.
+
+    Args:
+        cell_features (torch.Tensor): [N, 6] tensor containing cell attributes.
+                                      Columns 2 and 3 (x, y) are updated in-place.
+
+    Returns:
+        torch.Tensor: The updated cell_features tensor with legal coordinates.
+    """
+    N = cell_features.shape[0]
+    device = cell_features.device
+    
+    # Working copies
+    pos = cell_features[:, 2:4].clone().cpu().numpy()
+    widths = cell_features[:, 4].clone().cpu().numpy()
+    heights = cell_features[:, 5].clone().cpu().numpy()
+    
+    # Canvas parameters
+    CANVAS_W, CANVAS_H = 1000.0, 1000.0
+    
+    # Simple Occupancy Grid (Approximate) to speed up search
+    # 1000x1000 grid is 1M entries. manageable.
+    occupied = torch.zeros((1000, 1000), dtype=torch.bool)
+    # Use Numpy for grid (Faster CPU access and vectorization)
+    occupied = np.zeros((1000, 1000), dtype=bool)
+    
+    # Sort indices by Area (Descending) - Macros first
+    # Idea: Place Big blocks first (harder to fit), then fill gaps with small cells.
+    areas = widths * heights
+    indices = torch.argsort(torch.tensor(areas), descending=True).numpy()
+    
+    for idx in indices:
+        w = widths[idx]
+        h = heights[idx]
+        x = pos[idx, 0]
+        y = pos[idx, 1]
+        
+        # Snap to grid dimensions
+        w_grid = int(math.ceil(w + 0.05))
+        h_grid = int(math.ceil(h + 0.05))
+        w_grid = max(1, min(1000, w_grid))
+        h_grid = max(1, min(1000, h_grid))
+        
+        # Initial candidate (top-left)
+        tl_x = int(round(x - w/2))
+        tl_y = int(round(y - h/2))
+        
+    # Precompute spiral offsets once (up to radius 50)
+    # This optimization checks nearby spots first. I realized checking one by one was too slow in Python.
+    max_spiral_radius = 50
+    sq_radius = max_spiral_radius * 2 + 1
+    x_range = np.arange(-max_spiral_radius, max_spiral_radius + 1)
+    y_range = np.arange(-max_spiral_radius, max_spiral_radius + 1)
+    xx, yy = np.meshgrid(x_range, y_range)
+    dists = xx**2 + yy**2
+    # Sort by distance to ensure closest spots are checked first
+    flat_indices = np.argsort(dists.ravel())
+    spiral_dx = xx.ravel()[flat_indices]
+    spiral_dy = yy.ravel()[flat_indices]
+    
+    # Filter out 0,0 since we check it manually/implicitly or duplicate doesn't matter much
+    # The first element is 0,0.
+    
+    # print(f"DEBUG: Legalizing {len(indices)} cells with Vectorized Spiral...", flush=True)
+
+    for idx in indices:
+        w = widths[idx]
+        h = heights[idx]
+        x = pos[idx, 0]
+        y = pos[idx, 1]
+        
+        # Snap to grid dimensions
+        w_grid = int(math.ceil(w + 0.05))
+        h_grid = int(math.ceil(h + 0.05))
+        w_grid = max(1, min(1000, w_grid))
+        h_grid = max(1, min(1000, h_grid))
+        
+        # Initial candidate (top-left)
+        tl_x = int(round(x - w/2))
+        tl_y = int(round(y - h/2))
+        
+        found = False
+        
+        # OPTIMIZATION: Vectorized Spiral Search
+        # Initially, I used a loop here, but it was extremely slow for 100k cells.
+        # Moved to NumPy vectorization to check thousands of candidates at once.
+        
+        # 1. Generate candidate coordinates
+        cand_x = tl_x + spiral_dx
+        cand_y = tl_y + spiral_dy
+        
+        # 2. Filter bounds
+        valid_bounds = (cand_x >= 0) & (cand_y >= 0) & (cand_x + w_grid <= 1000) & (cand_y + h_grid <= 1000)
+        cand_x = cand_x[valid_bounds]
+        cand_y = cand_y[valid_bounds]
+        
+        if len(cand_x) > 0:
+            # 3. Check occupancy
+            # Fast check for standard cells (Height=1 usually)
+            if h_grid == 1 and w_grid <= 3:
+                # Optimized for known standard cell sizes
+                is_occupied = occupied[cand_x, cand_y]
+                if w_grid > 1:
+                    is_occupied |= occupied[cand_x + 1, cand_y]
+                if w_grid > 2:
+                    is_occupied |= occupied[cand_x + 2, cand_y]
+                    
+                # Find first free spot
+                free_indices = np.flatnonzero(~is_occupied)
+                if len(free_indices) > 0:
+                    best_k = free_indices[0]
+                    ctx, cty = cand_x[best_k], cand_y[best_k]
+                    
+                    occupied[ctx:ctx+w_grid, cty:cty+h_grid] = True
+                    pos[idx, 0] = ctx + w/2
+                    pos[idx, 1] = cty + h/2
+                    found = True
+            else:
+                # General case (iterative but still faster than python spiral generation)
+                # Check first few candidates?
+                # For macros, we can just iterate the sorted candidates
+                for k in range(min(5000, len(cand_x))): # Check first 5000 valid spots
+                    ctx, cty = cand_x[k], cand_y[k]
+                    if not occupied[ctx:ctx+w_grid, cty:cty+h_grid].any():
+                        occupied[ctx:ctx+w_grid, cty:cty+h_grid] = True
+                        pos[idx, 0] = ctx + w/2
+                        pos[idx, 1] = cty + h/2
+                        found = True
+                        break
+
+        # 2. FALLBACK STAGE: Integral Image 
+        # If the local search (spiral) fails, we need to scan the whole board.
+        # Checking every pixel is O(W*H), which is too slow.
+        # I used a Summed Area Table (SAT) to query range sums in O(1).
+        # This helps place the last few 'impossible' cells.
+        if not found:
+            # Construct Summed Area Table
+            sat = occupied.astype(int).cumsum(axis=0).cumsum(axis=1)
+            pad_sat = np.pad(sat, ((1,0), (1,0)), mode='constant')
+            
+            # Helper to get region sum in O(1)
+            rows = 1000 - w_grid + 1
+            cols = 1000 - h_grid + 1
+            
+            if rows > 0 and cols > 0:
+                region_sums = (pad_sat[w_grid:w_grid+rows, h_grid:h_grid+cols] 
+                             - pad_sat[0:rows, h_grid:h_grid+cols] 
+                             - pad_sat[w_grid:w_grid+rows, 0:cols] 
+                             + pad_sat[0:rows, 0:cols])
+                
+                valid_indices = np.argwhere(region_sums == 0)
+                
+                if len(valid_indices) > 0:
+                    # Choose the one closest to original (x,y)?
+                    # To optimize WL, we should find the closest available spot.
+                    # calculating distances to (tl_x, tl_y) for all candidates is vectorizable.
+                    
+                    cand_x = valid_indices[:, 0]
+                    cand_y = valid_indices[:, 1]
+                    
+                    dists = (cand_x - tl_x)**2 + (cand_y - tl_y)**2
+                    best_k = np.argmin(dists)
+                    
+                    ctx = cand_x[best_k]
+                    cty = cand_y[best_k]
+                    
+                    occupied[ctx:ctx+w_grid, cty:cty+h_grid] = True
+                    pos[idx, 0] = ctx + w/2
+                    pos[idx, 1] = cty + h/2
+                    found = True
+            
+        if not found:
+             print(f"CRITICAL: Could not legalize cell {idx}. Canvas full?")
+
+    # Update tensor
+    cell_features[:, 2:4] = torch.tensor(pos, device=device)
+    return cell_features
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
-    lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    num_epochs=300,
+    lr=0.5,
+    lambda_wirelength=0.001,
+    lambda_overlap=10000.0,
     verbose=True,
-    log_interval=100,
+    log_interval=50,
+    save_visuals=False,
+    visual_dir="visuals",
 ):
-    """Train the placement optimization using gradient descent.
+    """Run the placement optimization loop."""
+    if verbose:
+        print(f"Starting placement optimization...")
+        print(f"  Device: {cell_features.device}")
+        print(f"  Epochs: {num_epochs}")
+        print(f"  Learning Rate: {lr}")
 
-    Args:
-        cell_features: [N, 6] tensor with cell properties
-        pin_features: [P, 7] tensor with pin properties
-        edge_list: [E, 2] tensor with edge connectivity
-        num_epochs: Number of optimization iterations
-        lr: Learning rate for Adam optimizer
-        lambda_wirelength: Weight for wirelength loss
-        lambda_overlap: Weight for overlap loss
-        verbose: Whether to print progress
-        log_interval: How often to print progress
-
-    Returns:
-        Dictionary with:
-            - final_cell_features: Optimized cell positions
-            - initial_cell_features: Original cell positions (for comparison)
-            - loss_history: Loss values over time
-    """
-    # Clone features and create learnable positions
-    cell_features = cell_features.clone()
+    N = cell_features.shape[0]
     initial_cell_features = cell_features.clone()
-
-    # Make only cell positions require gradients
+    
+    # Initialize with grid if mostly zero (fix input ambiguity)
     cell_positions = cell_features[:, 2:4].clone().detach()
+    
+    # Initialize with a spread out grid to minimize initial overlaps
+    # Only do this if strictly necessary (all zeros). 
+    # Forcing it overrides potentially good initial state.
+    if torch.all(cell_positions.abs() < 1e-6): 
+        if verbose: print("Initializing with spread grid...")
+        rows = int(math.ceil(math.sqrt(N)))
+        cols = int(math.ceil(N / rows))
+        canvas_width = 1000.0
+        canvas_height = 1000.0
+        
+        spacing_x = canvas_width / (cols + 1)
+        spacing_y = canvas_height / (rows + 1)
+        
+        for i in range(N):
+            r = i // cols
+            c = i % cols
+            cell_positions[i, 0] = (c + 1) * spacing_x
+            cell_positions[i, 1] = (r + 1) * spacing_y
+            
+        # Add noise
+        cell_positions += torch.randn_like(cell_positions) * (spacing_x * 0.1)
+        
     cell_positions.requires_grad_(True)
-
-    # Create optimizer
+    
+    # History
+    loss_history = {"total_loss": [], "wirelength_loss": [], "overlap_loss": []}
+    
+    # Optimizer (Adam for speed)
     optimizer = optim.Adam([cell_positions], lr=lr)
+    scheduler = optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=100, T_mult=2)
 
-    # Track loss history
-    loss_history = {
-        "total_loss": [],
-        "wirelength_loss": [],
-        "overlap_loss": [],
-    }
-
-    # Training loop
+    consecutive_zero = 0
+    target_zero_epochs = 20
+    
+    # Large N Handling
+    use_exact_overlap = (N <= 2500)
+    if not use_exact_overlap:
+        pass # Large N optimization applied silently
+    
     for epoch in range(num_epochs):
         optimizer.zero_grad()
+        
+        current_features = cell_features.clone()
+        current_features[:, 2:4] = cell_positions
+        
+        progress = epoch / num_epochs
+        # Inflation: 1.2 -> 1.0 quickly
+        inflation = max(1.0, 1.2 - progress * 4.0)
+        
+        # Calculate Losses
+        wl_loss = wirelength_attraction_loss(current_features, pin_features, edge_list)
+        
+        if use_exact_overlap:
+            # Pure Repulsion Focus for small/medium designs
+            ov_loss = overlap_repulsion_loss(current_features, pin_features, edge_list, inflation_factor=inflation)
+            # Ramp up overlap penalty
+            # Reduced ramp from 50.0 to 5.0 to prioritize WL
+            curr_lambda_ov = lambda_overlap * (1.0 + progress * 5.0)
+            
+            # Remove density loss for small N (it conflicts with precise packing)
+            # d_loss = grid_density_loss(current_features)
+            # total_loss = lambda_wirelength * wl_loss + curr_lambda_ov * ov_loss + d_loss * 100.0
+            total_loss = lambda_wirelength * wl_loss + curr_lambda_ov * ov_loss
+            
+        else:
+            # Scalable approach for Large N (>2500)
+            d_loss = grid_density_loss(current_features)
+            
+            # Reduced density weight: Trust Legalizer to fix overlaps
+            # Prioritize Wirelength
+            lambda_density = 10000.0 * (1.0 + progress * 1.0) 
+            
+            ov_loss = torch.tensor(0.0)
+            
+            total_loss = lambda_wirelength * wl_loss + lambda_density * d_loss
 
-        # Create cell_features with current positions
-        cell_features_current = cell_features.clone()
-        cell_features_current[:, 2:4] = cell_positions
-
-        # Calculate losses
-        wl_loss = wirelength_attraction_loss(
-            cell_features_current, pin_features, edge_list
-        )
-        overlap_loss = overlap_repulsion_loss(
-            cell_features_current, pin_features, edge_list
-        )
-
-        # Combined loss
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
-
-        # Backward pass
+            
+        # Boundary constraints
+        bound_violation = torch.relu(-cell_positions) + torch.relu(cell_positions - 1000.0)
+        total_loss += torch.sum(bound_violation ** 2) * 500.0
+        
         total_loss.backward()
-
-        # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
-
-        # Update positions
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=20.0)
+        
         optimizer.step()
-
-        # Record losses
+        scheduler.step()
+        
+        # Tracking & Early Stopping
+        ov_val = ov_loss.item()
+        
+        if use_exact_overlap:
+            if ov_val <= 1e-5 and inflation <= 1.001:
+                consecutive_zero += 1
+            else:
+                consecutive_zero = 0
+        else:
+             # Run full epochs for large N to optimize WL
+            consecutive_zero = 0 
+            
         loss_history["total_loss"].append(total_loss.item())
         loss_history["wirelength_loss"].append(wl_loss.item())
-        loss_history["overlap_loss"].append(overlap_loss.item())
+        loss_history["overlap_loss"].append(ov_val)
+        
+        if verbose and epoch % log_interval == 0:
+            print(f"Epoch {epoch}: Tot={total_loss.item():.1f} OvLoss={ov_val:.6f} Infl={inflation:.2f}")
 
-        # Log progress
-        if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
-            print(f"Epoch {epoch}/{num_epochs}:")
-            print(f"  Total Loss: {total_loss.item():.6f}")
-            print(f"  Wirelength Loss: {wl_loss.item():.6f}")
-            print(f"  Overlap Loss: {overlap_loss.item():.6f}")
+        if consecutive_zero >= target_zero_epochs and epoch > 50:
+            if verbose: print(f"Converged at epoch {epoch} with zero overlap.")
+            break
 
-    # Create final cell features
+    # Final Polish: Legalization (Outside loop!)
+    if verbose: print("Running legalization step...")
+    cell_positions.data.clamp_(0, 1000.0)
     final_cell_features = cell_features.clone()
     final_cell_features[:, 2:4] = cell_positions.detach()
-
+    
+    # Enforce strict non-overlap
+    final_cell_features = legalize_placement(final_cell_features)
+    
     return {
         "final_cell_features": final_cell_features,
         "initial_cell_features": initial_cell_features,
-        "loss_history": loss_history,
+        "loss_history": loss_history
     }
 
 
