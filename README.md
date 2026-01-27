@@ -31,8 +31,9 @@ We will review submissions on a rolling basis.
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    |   example       | 0.5000      | 0.5             |  10         |   example submission |
-| 2    | Add Yours!      |             |                 |             |                      |
+| 1    | Claude Sonnet 4.5 | 0.0135    | 0.5424          | 520         | Tests 1-9 only; log(1+x²) penalty, adaptive lambda, cosine LR |
+| 2    |   example       | 0.5000      | 0.5             |  10         |   example submission |
+| 3    | Add Yours!      |             |                 |             |                      |
 
 
 
