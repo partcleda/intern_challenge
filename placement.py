@@ -397,13 +397,27 @@ def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=5000,
+    num_epochs=None,
     lr=0.1,
     lambda_wirelength=1.0,
     lambda_overlap=1000.0,
     verbose=True,
     log_interval=100,
 ):
+    """Train placement with automatic epoch scaling for large designs."""
+    # Auto-scale epochs based on problem size
+    if num_epochs is None:
+        N = cell_features.shape[0]
+        if N < 50:
+            num_epochs = 5000
+        elif N < 150:
+            num_epochs = 3000
+        elif N < 500:
+            num_epochs = 2000
+        elif N < 2000:
+            num_epochs = 1000
+        else:
+            num_epochs = 500
     """Train the placement optimization using gradient descent.
 
     Args:
