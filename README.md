@@ -31,8 +31,9 @@ We will review submissions on a rolling basis.
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    |   example       | 0.5000      | 0.5             |  10         |   example submission |
-| 2    | Add Yours!      |             |                 |             |                      |
+| 1    | Anthony Angeles | 0.0000      | 0.3222          |  31         | WL-pretraining + adaptive lr/epochs + fixed-speed lambda ramp |
+| 2    |   example       | 0.5000      | 0.5             |  10         |   example submission |
+| 3    | Add Yours!      |             |                 |             |                      |
 
 
 
