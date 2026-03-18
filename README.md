@@ -31,7 +31,7 @@ We will review submissions on a rolling basis.
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    |   example       | 0.5000      | 0.5             |  10         |   example submission |
+| 1    |   Dev Desai       | 0.000      | 0.8736             |  12.28 sec         |   example submission |
 | 2    | Add Yours!      |             |                 |             |                      |
 
 
