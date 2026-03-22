@@ -43,7 +43,8 @@ from enum import IntEnum
 
 import torch
 import torch.optim as optim
-
+import numpy as np
+import math
 
 # Feature index enums for cleaner code access
 class CellFeatureIdx(IntEnum):
@@ -299,7 +300,7 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
 
-def overlap_repulsion_loss(cell_features, pin_features, edge_list):
+def overlap_repulsion_loss(cell_features, pin_features, edge_list, epoch, decay_end_epoch, beta=0.5, threshold=1.0):
     """Calculate loss to prevent cell overlaps.
 
     TODO: IMPLEMENT THIS FUNCTION
@@ -347,29 +348,103 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     if N <= 1:
         return torch.tensor(0.0, requires_grad=True)
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    # Get pairwise distances
+    positions = cell_features[:, [2, 3]]
+    distances = positions.unsqueeze(1) - positions.unsqueeze(0)
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    # Get pairwise sizes and apply padding
+    sizes = cell_features[:, [4, 5]]
+    sum_of_sizes = sizes.unsqueeze(1) + sizes.unsqueeze(0)
+
+    max_padding = 2.0
+    min_padding = 0.1
+    progress = min(1.0, epoch / decay_end_epoch)
+    current_padding = max_padding - (max_padding - min_padding) * progress
+    padded_sum_of_sizes = sum_of_sizes * (1.0 + current_padding)
+
+    # Calculate spatial overlaps in X and Y
+    dx_dy_overlaps = torch.relu(padded_sum_of_sizes / 2.0 - torch.abs(distances))
+
+    # Calculate literal overlap area (squaring it creates a stronger penalty for deep overlaps)
+    overlap_areas = dx_dy_overlaps[..., 0] * dx_dy_overlaps[..., 1]
+
+    # Extract upper triangle to prevent double counting
+    unique_overlaps = torch.triu(overlap_areas, diagonal=1)
+
+    # Normalize by N, not N^2, to avoid vanishing gradients.
+    # Normalizing by N^2 dilutes local repulsive gradients to near-zero since most global pairs never overlap.
+    # Normalizing by N computes the average overlap per cell, maintaining a stable physical force at any scale.
+    # This allows the O(N) overlap penalty to properly balance against the O(E) wirelength attraction.
+    return torch.sum(unique_overlaps**2) / N
+
+
+def get_cyclic_repulsion_weight(epoch, total_epochs, n_cycles=10, min_lambda=10.0, max_lambda=100.0):
+    """
+    Returns a weight that oscillates between 0 and max_lambda.
+    """
+    # Determine where we are in the current cycle (0.0 to 1.0)
+    cycle_length = total_epochs / n_cycles
+    progress_in_cycle = (epoch % cycle_length) / cycle_length
+    amplitude = max_lambda - min_lambda
+    
+    # Using a sine wave for smoother transitions (rather than triangle):
+    sine_oscillator = 0.5 * (1 + math.sin(2 * np.pi * progress_in_cycle - np.pi/2))
+    weight = min_lambda + (amplitude * sine_oscillator)
+        
+    return weight
+
+
+def get_sigmoid_repulsion_weight(epoch, total_epochs):
+    # Center the sigmoid at 30% of total training
+    center = total_epochs * 0.3
+    # Steeper slope means a faster transition
+    width = total_epochs * 0.1 
+    
+    # Calculate sigmoid factor (0 to 1)
+    alpha = 1 / (1 + math.exp(-(epoch - center) / width))
+    
+    # Repulsion ramps up from 0.0 to 100.0 (or your chosen max)
+    lambda_repulsion = alpha * 100.0
+    
+    # Wirelength stays relatively high but can dip slightly to allow movement
+    # e.g., decaying from 1.0 down to 0.7
+    lambda_wire = 1.0 - (alpha * 0.3)
+    
+    return lambda_wire, lambda_repulsion
+
+
+def get_exponential_repulsion_weight(epoch, total_epochs, initial_lambda=1.0, max_lambda=500.0):
+    """
+    Calculates a monotonically increasing overlap weight using an exponential curve.
+
+    Early epochs: Weight remains low, allowing cells to pass through each other
+                  and group tightly based on wirelength connectivity.
+    Late epochs:  Weight ramps up aggressively to separate the cells and
+                  enforce a strictly legal, non-overlapping placement.
+    """
+    # Prevent division by zero
+    if total_epochs <= 1:
+        return max_lambda
+
+    # Calculate progress from 0.0 to 1.0
+    progress = epoch / (total_epochs - 1)
+
+    # Exponential interpolation between initial_lambda and max_lambda
+    current_lambda = initial_lambda * ((max_lambda / initial_lambda) ** progress)
+
+    return current_lambda
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
+    num_epochs=5000,
+    lr=5.0,
     lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    lambda_overlap=100.0,
     verbose=True,
-    log_interval=100,
+    log_interval=500,
 ):
     """Train the placement optimization using gradient descent.
 
@@ -390,6 +465,16 @@ def train_placement(
             - initial_cell_features: Original cell positions (for comparison)
             - loss_history: Loss values over time
     """
+    
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if verbose:
+        print(f"Executing training on device: {device}")
+
+    # Move base tensors to the selected device
+    cell_features = cell_features.to(device)
+    pin_features = pin_features.to(device)
+    edge_list = edge_list.to(device)
+    
     # Clone features and create learnable positions
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
@@ -408,6 +493,13 @@ def train_placement(
         "overlap_loss": [],
     }
 
+    # now I can also look at learning rate scheduler, again cosine
+    warmup_steps = int(num_epochs / 10.0)
+    warmup_scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_steps)
+    decay_steps = num_epochs - warmup_steps
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=decay_steps, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, schedulers=[warmup_scheduler, cosine_scheduler], milestones=[warmup_steps])
+
     # Training loop
     for epoch in range(num_epochs):
         optimizer.zero_grad()
@@ -421,11 +513,27 @@ def train_placement(
             cell_features_current, pin_features, edge_list
         )
         overlap_loss = overlap_repulsion_loss(
-            cell_features_current, pin_features, edge_list
+            cell_features_current, pin_features, edge_list, epoch, 1.1 * num_epochs
         )
 
         # Combined loss
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+        min_overlap_lambda = 5
+        max_overlap_lambda = 10
+        # calc_lambda_overlap = get_cyclic_repulsion_weight(
+        #     epoch,
+        #     num_epochs,
+        #     n_cycles=(num_epochs // 500),
+        #     min_lambda=min_overlap_lambda,
+        #     max_lambda=max_overlap_lambda
+        # )
+        calc_lambda_overlap = get_exponential_repulsion_weight(
+            epoch=epoch,
+            total_epochs=num_epochs,
+            initial_lambda=0.5,
+            max_lambda=7.5
+        )
+        calc_lambda_wirelength = lambda_wirelength
+        total_loss = calc_lambda_wirelength * wl_loss + calc_lambda_overlap * overlap_loss
 
         # Backward pass
         total_loss.backward()
@@ -435,6 +543,7 @@ def train_placement(
 
         # Update positions
         optimizer.step()
+        scheduler.step()
 
         # Record losses
         loss_history["total_loss"].append(total_loss.item())
@@ -449,12 +558,12 @@ def train_placement(
             print(f"  Overlap Loss: {overlap_loss.item():.6f}")
 
     # Create final cell features
-    final_cell_features = cell_features.clone()
-    final_cell_features[:, 2:4] = cell_positions.detach()
+    final_cell_features = cell_features.clone().cpu()
+    final_cell_features[:, 2:4] = cell_positions.detach().cpu()
 
     return {
         "final_cell_features": final_cell_features,
-        "initial_cell_features": initial_cell_features,
+        "initial_cell_features": initial_cell_features.detach().cpu(),
         "loss_history": loss_history,
     }
 
@@ -716,11 +825,11 @@ def main():
     print("while minimizing wirelength.\n")
 
     # Set random seed for reproducibility
-    torch.manual_seed(42)
+    torch.manual_seed(2010)
 
     # Generate placement problem
-    num_macros = 3
-    num_std_cells = 50
+    num_macros = 10
+    num_std_cells = 1000
 
     print(f"Generating placement problem:")
     print(f"  - {num_macros} macros")
