@@ -31,7 +31,7 @@ We will review submissions on a rolling basis.
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    | Sanjeev Sinha   | 0.0000      | 0.1493          |  4057.78    |   KD-Tree usage for large designs with convergence checks |
+| 1    | Sanjeev Sinha   | 0.0000      | 0.1493          |  4057.78    |   KD-Tree usage for large designs with convergence checks. Test Case 12 takes 3662.55s, runtime is WIP. |
 | 2    |   example       | 0.5000      | 0.5             |  10         |   example submission |
 | 3    | Add Yours!      |             |                 |             |                      |
 
