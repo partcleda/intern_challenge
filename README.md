@@ -35,6 +35,16 @@ We will review submissions on a rolling basis.
 | 2    | Add Yours!      |             |                 |             |                      |
 
 
+- Gradient Clipping
+  - LR Scheduler
+- Wirelength loss
+- Make loss reflect the fact that every step in the "GAN" leads to a better final state.
+  - Currently, the loss doesn't reflect it much at all, but it does automatically get better with each "GAN" step.
+- Optimizer (and optim hyperparams)
+- "Budging it"
+
+- All valid permutations -> min of wirelength (except make it differentiable)
+
 
 ## Leaderboard (sorted by overlap) (OLD; test suite has been updated; see above)
 

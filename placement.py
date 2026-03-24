@@ -501,7 +501,7 @@ def train_placement(
         #     b = (epoch // (num_epochs//5)) % 2 == 0
         # else:
         #     b = .75*num_epochs < epoch < .85*num_epochs
-        if epoch >= .8*num_epochs:
+        if epoch >= 0.8*num_epochs:  # 35000:
             lambda_overlap_ = lambda_overlap
             lambda_wirelength_ = 0.
         elif (epoch // (num_epochs//8)) % 2 == 0:
@@ -519,7 +519,7 @@ def train_placement(
         # pin_absolute_x = x[cell_indices] + pin_features[:, 1]
         # pin_absolute_y = y[cell_indices] + pin_features[:, 2]
         # wl_loss += .05*torch.mean(x**2 + y**2)
-        # wl_loss += .001*torch.mean(x**2 + y**2)
+        wl_loss += .001*torch.mean(x**2 + y**2)
         # wl_loss += .001*torch.mean(pin_absolute_x**2 + pin_absolute_y**2)
         # loss = torch.where(
         #     loss == 0,
@@ -540,7 +540,7 @@ def train_placement(
         total_loss.backward()
 
         # Gradient clipping to prevent extreme updates
-        # torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
 
         # Update positions
         optimizer.step()
