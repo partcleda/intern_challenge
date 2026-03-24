@@ -295,7 +295,7 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
 
     # Total wirelength
     total_wirelength = torch.sum(smooth_manhattan)
-
+    
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
 
@@ -343,6 +343,8 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     Returns:
         Scalar loss value (should be 0 when no overlaps exist)
     """
+    # def calculate_overlap_1d()
+
     N = cell_features.shape[0]
     if N <= 1:
         return torch.tensor(0.0, requires_grad=True)
@@ -357,17 +359,90 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     # Delete this placeholder and add your implementation:
 
     # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    # return torch.tensor(1.0, requires_grad=True)
+
+    areas = cell_features[:, CellFeatureIdx.AREA]  # = areas
+    # num_pins = cell_features[:, CellFeatureIdx.NUM_PINS] = num_pins_per_cell.float()
+    x = cell_features[:, CellFeatureIdx.X]  # = 0.0  # x position (initialized to 0)
+    y = cell_features[:, CellFeatureIdx.Y]  # = 0.0  # y position (initialized to 0)
+    w = cell_features[:, CellFeatureIdx.WIDTH]  # = cell_widths
+    h = cell_features[:, CellFeatureIdx.HEIGHT]  # = cell_heights
+
+    # # Calculate absolute pin positions
+    cell_indices = pin_features[:, 0].long()
+    pin_absolute_x = x[cell_indices] + pin_features[:, 1]
+    pin_absolute_y = y[cell_indices] + pin_features[:, 2]
+
+    # # Get source and target pin positions for each edge
+    # src_pins = edge_list[:, 0].long()
+    # tgt_pins = edge_list[:, 1].long()
+
+    # src_x = pin_absolute_x[src_pins]
+    # src_y = pin_absolute_y[src_pins]
+    # tgt_x = pin_absolute_x[tgt_pins]
+    # tgt_y = pin_absolute_y[tgt_pins]
+
+    # TODO: Optimize torch.triu
+    overlap_x = w.unsqueeze(0) + w.unsqueeze(1)
+    overlap_x /= 2.
+    overlap_x -= torch.abs(x.unsqueeze(0) - x.unsqueeze(1))
+    overlap_x = torch.relu(overlap_x)
+    overlap_x = torch.triu(overlap_x, diagonal=1)
+
+    overlap_y = h.unsqueeze(0) + h.unsqueeze(1)
+    overlap_y /= 2.
+    overlap_y -= torch.abs(y.unsqueeze(0) - y.unsqueeze(1))
+    overlap_y = torch.relu(overlap_y)
+    overlap_y = torch.triu(overlap_y, diagonal=1)
+
+    loss = overlap_x * overlap_y
+    # loss *= areas.unsqueeze(0) + areas.unsqueeze(1)
+    # print(loss.mean())
+    # breakpoint()
+
+    # loss += 0.001*(x**2 + y**2)
+    # loss += 0.001*torch.mean(x**2 + y**2)
+    # loss += 0.001*torch.mean(pin_absolute_x**2 + pin_absolute_y**2)
+    # loss = torch.where(
+    #     loss == 0,
+    #     loss + 0.001*torch.mean(x**2 + y**2),
+    #     loss
+    # )
+
+    # canvas_area = (torch.max(x+w/2.) - torch.min(x-w/2.)) * (torch.max(y+h/2.) - torch.min(y-h/2.))
+    # canvas_area = canvas_area - 27*(torch.sum(w)**0.5 * torch.sum(h)**0.5)
+    # print(loss.min(), loss.max(), canvas_area)
+    # loss = canvas_area
+    # loss += 1.*canvas_area
+    # loss = torch.where(
+    #     loss == 0,
+    #     loss + 1.*canvas_area,
+    #     loss
+    # )
+
+    # dist_sq = (x.unsqueeze(0) - x.unsqueeze(1))**2 + (y.unsqueeze(0) - y.unsqueeze(1))**2
+    # dist_sq = dist_sq / torch.max(dist_sq)
+    # loss = torch.where(
+    #     loss == 0,
+    #     loss + .0001*dist_sq,  # 0.00001*
+    #     loss
+    # )
+    loss *= .2  # 200000.
+    # loss = torch.triu(loss, diagonal=1)
+    # breakpoint()
+    loss = torch.mean(loss)
+
+    return loss
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
+    num_epochs=40000,
     lr=0.01,
-    lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    lambda_wirelength=100000000.0,
+    lambda_overlap=1000000000.0,
     verbose=True,
     log_interval=100,
 ):
@@ -400,6 +475,9 @@ def train_placement(
 
     # Create optimizer
     optimizer = optim.Adam([cell_positions], lr=lr)
+    # scheduler = optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, T_max=num_epochs, eta_min=lr*0.3
+    # )
 
     # Track loss history
     loss_history = {
@@ -417,24 +495,57 @@ def train_placement(
         cell_features_current[:, 2:4] = cell_positions
 
         # Calculate losses
+        # if epoch < num_epochs//2:
+        # if epoch % 2 == 0:
+        # if epoch < 1.8*num_epochs:
+        #     b = (epoch // (num_epochs//5)) % 2 == 0
+        # else:
+        #     b = .75*num_epochs < epoch < .85*num_epochs
+        if epoch >= .8*num_epochs:
+            lambda_overlap_ = lambda_overlap
+            lambda_wirelength_ = 0.
+        elif (epoch // (num_epochs//8)) % 2 == 0:
+            lambda_overlap_ = 1000.
+            lambda_wirelength_ = lambda_wirelength
+        else:
+            lambda_overlap_ = lambda_overlap
+            lambda_wirelength_ = 1000.
         wl_loss = wirelength_attraction_loss(
             cell_features_current, pin_features, edge_list
         )
+        x = cell_features_current[:, CellFeatureIdx.X]  # = 0.0  # x position (initialized to 0)
+        y = cell_features_current[:, CellFeatureIdx.Y]  # = 0.0  # y position (initialized to 0)
+        # cell_indices = pin_features[:, 0].long()
+        # pin_absolute_x = x[cell_indices] + pin_features[:, 1]
+        # pin_absolute_y = y[cell_indices] + pin_features[:, 2]
+        # wl_loss += .05*torch.mean(x**2 + y**2)
+        # wl_loss += .001*torch.mean(x**2 + y**2)
+        # wl_loss += .001*torch.mean(pin_absolute_x**2 + pin_absolute_y**2)
+        # loss = torch.where(
+        #     loss == 0,
+        #     loss + 0.001*torch.mean(pin_absolute_x**2 + pin_absolute_y**2),
+        #     loss
+        # )
+            # overlap_loss = torch.tensor(0.)
+        # else:
         overlap_loss = overlap_repulsion_loss(
             cell_features_current, pin_features, edge_list
         )
+            # wl_loss = torch.tensor(0.)
 
         # Combined loss
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+        total_loss = lambda_wirelength_ * wl_loss + lambda_overlap_ * overlap_loss
 
         # Backward pass
         total_loss.backward()
 
         # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
+        # torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
 
         # Update positions
         optimizer.step()
+        # scheduler.step()
+        # print(scheduler.get_lr())
 
         # Record losses
         loss_history["total_loss"].append(total_loss.item())
