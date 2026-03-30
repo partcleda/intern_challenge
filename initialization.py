@@ -4,9 +4,6 @@ import torch
 from data import PinFeatureIdx, CellFeatureIdx
 from constants import MIN_MACRO_AREA, CELL_SPACING, MAX_ROW_WIDTH
 
-# from placement import generate_placement_input, plot_placement, calculate_normalized_metrics
-
-
 def build_cell_level_edge_list(pin_features, edge_list):
     """
     Convert a pin-level edge list to a cell-level edge list.
@@ -283,17 +280,3 @@ def initialize_placement(cell_features, pin_features, edge_list):
     virtual_macro = create_virtual_macro(bbox)
 
     return cell_features, virtual_macro
-
-'''
-if __name__ == "__main__":
-    num_macros = 10
-    num_std_cells = 1000
-    cell_features, pin_features, edge_list = generate_placement_input(num_macros, num_std_cells)
-    updated_cell_features, virtual_macro = initialize_placement(cell_features, pin_features, edge_list)
-
-    plot_placement(cell_features, updated_cell_features, "cell_placement.png")
-    metrics = calculate_normalized_metrics(updated_cell_features, pin_features, edge_list)
-    print("Initial placement metrics:")
-    for name, value in metrics.items():
-        print(f"  {name}: {value:.4f}")
-'''

@@ -648,6 +648,7 @@ def main():
 
     # Set random seed for reproducibility
     torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
 
     # Generate placement problem
     num_macros = 3
