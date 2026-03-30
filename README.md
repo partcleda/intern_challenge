@@ -16,9 +16,9 @@ The deadline is when all intern slots for summer 2026 are filled. We will review
 
 1. **Fork this repository.**
 2. Solve the placement problem using your preferred tools or scripts.  
-3. Run the test script to evaluate your solution and obtain the overlap and wirelength metrics.  
-4. Submit a pull request with your updated leaderboard entry and instructions for me to access your actual submission (it's fine if it's public).  
-
+3. Run the first 10 tests to evaluate your solution and obtain the overlap and wirelength metrics. Report Average Overlap, Wirelength and total Runtime. *Test cases 11 and 12 are extra credit, give them a shot if you have some time.*  
+5. Submit a pull request with your updated leaderboard entry and instructions for me to access your actual submission (it's fine if it's public).
+ 
 Note: You can use any libraries or frameworks you like, but please ensure that your code is well-documented and easy to follow.  
 
 Also, if you think there are any bugs in the provided code, feel free to fix them and mention the changes in your submission.  
@@ -27,30 +27,22 @@ You may submit multiple solutions to try and increase your score.
 
 We will review submissions on a rolling basis.
 
-## New Leaderboard (sorted by overlap)
+## Leaderboard (sorted by overlap)
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    |   example       | 0.5000      | 0.5             |  10         |   example submission |
-| 2    | Pratul-Saini    | 0.0000      | 0.2731          |  1020.72    |   only first 11 tests|
-
-
-
-## Leaderboard (sorted by overlap) (OLD; test suite has been updated; see above)
-
-| Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
-|------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    | Shashank Shriram  | 0.0000     | 0.1310          |  11.32      |   🏎️💥               |
-| 2    | Brayden Rudisill  | 0.0000    | 0.2611          |   50.51     |   Timed on a mac air |
-| 3    | manuhalapeth      | 0.0000    | 0.2630          |  196.8      |                      |
-| 4    | Neil Teje         | 0.0000    | 0.2700          | 24.00s      |                      |
-| 5    | Leison Gao      | 0.0000      | 0.2796          | 50.14s      |                      |
-| 6    | William Pan     | 0.0000      | 0.2848          | 155.33s     |                      |
-| 7    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      |  Spent my entire morning (12 am - 6 am) doing this :P       |
-| 8    | Pawan Paleja     | 0.0000      | 0.3311         | 1.74s     |   Implemented hint for loss func, cosine annealing on learning rate with warmup, std annealing on lambda weight. Used optuna to tune hyperparam. Tested on gh codespaces 2-core.                   |
+| 0    | Pratul-Saini    |  0.0000     | 0.2557          | 680.62s     | Moved some pre-existing computation to GPU. Created some initialization based on connectivity heuristic, added warmup on wirelength, cosine annealing on learning rate. Only ran on first 10 tests for scoring purposes. I'll add data for other tests soon, but the 12th test needs optimization on the problem generation standpoint.       |
+| 1    | Brayden Rudisill  | 0.0000    | 0.2611          |   50.51     |   Timed on a mac air |
+| 2    | manuhalapeth      | 0.0000    | 0.2630          |  196.8      |                      |
+| 3    | Neil Teje         | 0.0000    | 0.2700          | 24.00s      |                      |
+| 4    | Leison Gao      | 0.0000      | 0.2796          | 50.14s      |                      |
+| 5    | William Pan     | 0.0000      | 0.2848          | 155.33s     |                      |
+| 6    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      |  Spent my entire morning (12 am - 6 am) doing this :P       |
+| 7    | Pawan Paleja     | 0.0000      | 0.3311         | 1.74s     |   Implemented hint for loss func, cosine annealing on learning rate with warmup, std annealing on lambda weight. Used optuna to tune hyperparam. Tested on gh codespaces 2-core.                   |
+ 8   | Shashank Shriram  | 0.0000     | 0.3312          |  11.32      |   🏎️💥               |
 | 9    | Gabriel Del Monte  | 0.0000      | 0.3427          | 606.07      |                                                              |
 | 10    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |        
-| 11   | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
+| 11   | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      | 
 | 12    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
 | 13    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
 | 14   | Nawel Asgar    | 0.0000     | 0.5675          | 81.49      | Adaptive penalty scaling with cubic gradients and design-size optimization

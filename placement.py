@@ -290,10 +290,11 @@ def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=25000,
+    num_epochs=20000,
     lr=0.1,
     lambda_wirelength=5.0,
     lambda_overlap=1000.0,
+    warmup_fraction=0.2,
     verbose=True,
     log_interval=100,
 ):
@@ -321,9 +322,6 @@ def train_placement(
         virtual_macro = virtual_macro.to(DEVICE)
 
     positions.requires_grad_(True)
-    optimizer = optim.Adam([positions], lr=lr)    
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_epochs, eta_min=1e-4)
-
 
     loss_history = {
         "total_loss": [],
@@ -334,31 +332,77 @@ def train_placement(
     best_positions = positions.clone().detach()
     best_wl_loss = float("inf")
 
-    for epoch in range(num_epochs):
-        progress = min(1.0, epoch / (num_epochs * 0.75))
-        current_lambda_overlap = lambda_overlap * progress
+    warmup_epochs = int(num_epochs * warmup_fraction)
+    overlap_epochs = num_epochs - warmup_epochs
+
+    # ---- Phase 1: wirelength-only warmup with its own optimizer ----
+    if warmup_epochs > 0:
+        optimizer_wl = optim.Adam([positions], lr=lr)
+        scheduler_wl = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer_wl, T_max=warmup_epochs, eta_min=1e-4
+        )
+
+        for epoch in range(warmup_epochs):
+            optimizer_wl.zero_grad()
+
+            cell_features_current = cell_features.clone()
+            if optimize_all:
+                cell_features_current[:, 2:4] = positions
+            else:
+                cell_features_current[macro_indices, 2:4] = positions
+
+            wl_loss = wirelength_attraction_loss(cell_features_current, pin_features, edge_list)
+
+            with torch.no_grad():
+                if virtual_macro is not None:
+                    overlap_cells = torch.cat([cell_features_current[macro_indices], virtual_macro], dim=0)
+                    overlap_loss_val = overlap_repulsion_loss(overlap_cells).item()
+                else:
+                    overlap_loss_val = overlap_repulsion_loss(cell_features_current).item()
+
+            total_loss = lambda_wirelength * wl_loss
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_([positions], max_norm=5.0)
+            optimizer_wl.step()
+            scheduler_wl.step()
+
+            loss_history["total_loss"].append(total_loss.item())
+            loss_history["wirelength_loss"].append(wl_loss.item())
+            loss_history["overlap_loss"].append(overlap_loss_val)
+
+            if verbose and (epoch % log_interval == 0 or epoch == warmup_epochs - 1):
+                print(f"Epoch {epoch}/{num_epochs} [WL-warmup]:")
+                print(f"  Wirelength Loss: {wl_loss.item():.10f}")
+                print(f"  Overlap (no grad): {overlap_loss_val:.10f}")
+
+    # ---- Phase 2: joint wirelength + overlap with fresh optimizer ----
+    optimizer = optim.Adam([positions], lr=lr)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=overlap_epochs, eta_min=1e-4
+    )
+
+    for epoch in range(overlap_epochs):
+        global_epoch = warmup_epochs + epoch
+        phase2_progress = min(1.0, epoch / (overlap_epochs * 0.6))
+        current_lambda_overlap = lambda_overlap * phase2_progress
         current_lambda_wirelength = lambda_wirelength
 
         optimizer.zero_grad()
 
-        # Splice current positions into full cell features
         cell_features_current = cell_features.clone()
         if optimize_all:
             cell_features_current[:, 2:4] = positions
         else:
             cell_features_current[macro_indices, 2:4] = positions
 
-        # Wirelength: always uses all cells
         wl_loss = wirelength_attraction_loss(cell_features_current, pin_features, edge_list)
 
-        # Overlap: all cells or macros + virtual macro
         if virtual_macro is not None:
             overlap_cells = torch.cat([cell_features_current[macro_indices], virtual_macro], dim=0)
             overlap_loss = overlap_repulsion_loss(overlap_cells)
         else:
             overlap_loss = overlap_repulsion_loss(cell_features_current)
 
-        # Checkpoint best overlap-free state
         if overlap_loss.item() < 1e-6 and wl_loss.item() < best_wl_loss:
             best_wl_loss = wl_loss.item()
             best_positions = positions.clone().detach()
@@ -373,8 +417,8 @@ def train_placement(
         loss_history["wirelength_loss"].append(wl_loss.item())
         loss_history["overlap_loss"].append(overlap_loss.item())
 
-        if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
-            print(f"Epoch {epoch}/{num_epochs}:")
+        if verbose and (global_epoch % log_interval == 0 or epoch == overlap_epochs - 1):
+            print(f"Epoch {global_epoch}/{num_epochs} [WL+Overlap]:")
             print(f"  Total Loss: {total_loss.item():.10f}")
             print(f"  Wirelength Loss: {wl_loss.item():.10f}")
             print(f"  Overlap Loss: {overlap_loss.item():.10f}")
