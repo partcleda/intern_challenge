@@ -31,7 +31,7 @@ We will review submissions on a rolling basis.
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    | Pratul-Saini    | 0.0000      | 0.2731          |  1020.72    |   only first 11 tests. 12th test takes very very long to generate on my laptop and I'm not very patient. |
+| 1    | Pratul-Saini    | 0.0000      | 0.2731          |  1020.72    |   only first 11 tests. 12th test takes very very long to generate on my laptop and I'm not very patient (overlap metrics - not loss - takes O(N^2). We should compute this just once and save it given a static seed)|
 
 
 
