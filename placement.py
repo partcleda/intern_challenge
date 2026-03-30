@@ -246,7 +246,7 @@ def generate_placement_input(num_macros, num_std_cells):
 
 # ======= OPTIMIZATION CODE (edit this part) =======
 
-def wirelength_attraction_loss(cell_features, pin_features, edge_list):
+def wirelength_attraction_loss(cell_features, pin_features, edge_list, gamma=1.0):
     """Calculate loss based on total wirelength to minimize routing.
 
     This is a REFERENCE IMPLEMENTATION showing how to write a differentiable loss function.
@@ -258,6 +258,8 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
         cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
         pin_features: [P, 7] tensor with pin information
         edge_list: [E, 2] tensor with edges
+        gamma: WA smoothing — larger is smoother; anneal from 1.0→0.1 during
+               training so the final loss closely approximates true HPWL
 
     Returns:
         Scalar loss value
@@ -283,7 +285,14 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     tgt_y = pin_absolute_y[tgt_pins]
 
     # WA (Weighted Average) wirelength model from DREAMPlace.
-    gamma = 0.5  # Smoothing parameter: smaller → sharper approximation
+    # For each 2-pin edge, WA approximates the bounding-box half-perimeter:
+    #   WA_x ≈ max(x1, x2) - min(x1, x2) = |x1 - x2|
+    # via softmax-weighted averages over pin positions:
+    #   WA_pos_x = softmax( x/gamma) · x  ≈ max(x)
+    #   WA_neg_x = softmax(-x/gamma) · x  ≈ min(x)
+    #   WA_x = WA_pos_x - WA_neg_x
+    # torch.softmax is numerically stable (subtracts max internally).
+    # Smaller gamma → sharper (closer to true HPWL); anneal down during training.
 
     x_pos = torch.stack([src_x, tgt_x], dim=0)  # [2, E]
     y_pos = torch.stack([src_y, tgt_y], dim=0)  # [2, E]
@@ -298,25 +307,27 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
 
 
-def overlap_repulsion_loss(cell_features, pin_features, edge_list):
-    """Calculate loss to prevent cell overlaps using pairwise overlap area.
+def overlap_repulsion_loss(cell_features, pin_features, edge_list, grid_size=None):
+    """Calculate loss to prevent cell overlaps via ePlace/DREAMPlace bin-density penalty.
 
-    For every pair of rectangular cells the actual 2D overlap area is computed
-    and penalised. The rectangle model is centre-based: a cell at (x, y) with
-    width w and height h occupies [x-w/2, x+w/2] × [y-h/2, y+h/2].
+    Instead of an O(N²) pairwise matrix, the canvas is divided into a G×G grid of
+    bins. Each cell contributes to nearby bins via a differentiable triangle kernel
+    (the NTUplace3 / DREAMPlace density model). Bins whose density exceeds the
+    uniform target are penalised quadratically — this drives cells to spread
+    uniformly and eliminates overlaps without ever building an [N,N] tensor.
 
-    Two cells overlap in x when |x_i - x_j| < (w_i + w_j)/2, and similarly
-    for y. The 2D overlap area is relu(sep_x - |dx|) * relu(sep_y - |dy|),
-    which is zero as soon as cells stop touching in either axis — making the
-    loss naturally zero at a legal placement.
+    Memory: O(N·G + G²) via BLAS sgemm — handles N=100K+ on a laptop.
+    Gradients exist everywhere (nonzero even before cells touch), giving the
+    optimiser a long-range spreading signal that pairwise ReLU lacks.
 
     Args:
         cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
         pin_features: [P, 7] tensor with pin information (not used here)
         edge_list: [E, 2] tensor with edges (not used here)
+        grid_size: G for the G×G bin grid; None → auto-scaled with N
 
     Returns:
-        Scalar loss value (zero when no cells overlap)
+        Scalar loss value (near zero when density is everywhere ≤ target)
     """
     N = cell_features.shape[0]
     if N <= 1:
@@ -327,53 +338,229 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     w = cell_features[:, CellFeatureIdx.WIDTH]
     h = cell_features[:, CellFeatureIdx.HEIGHT]
 
-    dx = (x.unsqueeze(0) - x.unsqueeze(1)).abs()
-    dy = (y.unsqueeze(0) - y.unsqueeze(1)).abs()
+    # Auto-scale grid size with N: coarser for tiny designs (less overhead),
+    # finer for large designs (better spatial resolution).
+    # Continuous formula for N>200 gives G≈95 at N=2010 and G=128 at N=10k+,
+    # which produces sharper repulsion gradients that push cells apart more
+    # precisely than the old hard cap of 64.
+    if grid_size is None:
+        if N <= 50:
+            G = 16
+        elif N <= 200:
+            G = 32
+        else:
+            G = min(128, int(N ** 0.5 * 1.5))
+    else:
+        G = grid_size
 
-    margin = 0.5
-    min_sep_x = (w.unsqueeze(0) + w.unsqueeze(1)) / 2 + margin
-    min_sep_y = (h.unsqueeze(0) + h.unsqueeze(1)) / 2 + margin
+    # Canvas: square, sized so cells fill ~1/1.35 of the area (35% free space).
+    # Extra slack lowers target_density so the penalty fires less during WL
+    # refinement, letting cells cluster freely around their nets.
+    total_cell_area = (w * h).sum()
+    canvas_side = (total_cell_area * 1.35).sqrt()
+    half_canvas = canvas_side / 2.0
 
-    ov_x = torch.relu(min_sep_x - dx)
-    ov_y = torch.relu(min_sep_y - dy)
+    bin_size = canvas_side / G
+    half_bin = bin_size / 2.0
+    bin_area = bin_size * bin_size
 
-    overlap_area = ov_x * ov_y
+    # Bin centres along one axis: [G]
+    bin_centers = torch.linspace(
+        (-half_canvas + half_bin).item(),
+        ( half_canvas - half_bin).item(),
+        G,
+        dtype=x.dtype,
+    )
 
-    num_pairs = N * (N - 1) / 2
-    return torch.triu(overlap_area, diagonal=1).sum() / num_pairs
+    # Cell half-sizes: [N, 1] for broadcasting against [1, G]
+    half_w = (w / 2).unsqueeze(1)   # [N, 1]
+    half_h = (h / 2).unsqueeze(1)   # [N, 1]
+
+    dx = (x.unsqueeze(1) - bin_centers.unsqueeze(0)).abs()   # [N, G]
+    dy = (y.unsqueeze(1) - bin_centers.unsqueeze(0)).abs()   # [N, G]
+
+    reach_x = half_w + half_bin   # [N, 1] — broadcast to [N, G]
+    reach_y = half_h + half_bin
+
+    # Physical coverage kernel (fraction of bin width/height covered by cell i).
+    # Formula: overlap_len / bin_size = max(0, min(reach-|u|, 2*half_w, 2*half_bin)) / bin_size
+    #
+    # This is the exact rectangular overlap fraction and lies in [0, 1] for every
+    # cell-bin pair — crucially, a large macro that spans a bin fully contributes
+    # exactly 1.0 (not cell_area/bin_area which can be >> 1 and causes the density
+    # penalty to be permanently huge regardless of placement quality).
+    #
+    # Key properties:
+    #   • sum over bins m of px[i,m] = half_w[i] / half_bin  (conserves cell area)
+    #   • sum_{m,n} density[m,n] = total_cell_area / bin_area = target * G²  ✓
+    num_x = torch.minimum(torch.minimum(reach_x - dx, 2.0 * half_w), 2.0 * half_bin)
+    px = torch.relu(num_x) / (2.0 * half_bin)   # [N, G] ∈ [0, 1]
+
+    num_y = torch.minimum(torch.minimum(reach_y - dy, 2.0 * half_h), 2.0 * half_bin)
+    py = torch.relu(num_y) / (2.0 * half_bin)   # [N, G] ∈ [0, 1]
+
+    # Density map [G, G] via BLAS sgemm — never builds an [N, G, G] tensor.
+    # density[m, n] = Σ_i px[i, m] * py[i, n]  (fractional coverage sum)
+    density = px.T @ py   # [G, G]
+
+    # Target: cells spread uniformly at total_cell_area / canvas_area ≈ 0.83.
+    # When spread, interior bins of large macros reach 1.0 (unavoidable — macro
+    # fills the bin), so overflow ≈ 0.17 there; those are tiny and constant-gradient
+    # w.r.t. macro position, so they don't corrupt the WL signal after spreading.
+    target_density = total_cell_area / (canvas_side * canvas_side)
+
+    # Quadratic overflow penalty (RePlAce / DREAMPlace formulation).
+    overflow = torch.relu(density - target_density)
+    return overflow.pow(2).sum() / (G * G)
+
+
+def legalize_placement(cell_features):
+    """Remove any residual overlaps with a greedy sweep — guarantees zero overlap.
+
+    After gradient optimisation, tiny floating-point overlaps may remain. This
+    function performs a deterministic, O(N log N) legalization:
+
+    1. Sort cells by x-centre.
+    2. For each cell in order, do a binary-search window query over a sorted list
+       of already-placed cells to find all candidates whose x-centre is within
+       max_w of cell i.  Push cell i right until it clears every candidate,
+       re-querying after each push so the new position is used immediately.
+    3. A second pass along y handles any stubborn vertical overlaps.
+    4. The x+y sweep pair is repeated 3 times to resolve macro–std-cell boundary
+       re-overlaps that a single pass can introduce.
+
+    Using a sorted-insertion list (bisect) instead of an O(N) inner scan reduces
+    each sweep from O(N²) to O(N log N + N·k) where k is the average number of
+    overlapping neighbours (≈ 1–5 after optimisation).  Critically, every query
+    uses the cell's CURRENT position — no stale spatial-index issue.
+
+    Args:
+        cell_features: [N, 6] tensor (modified in-place and returned)
+
+    Returns:
+        cell_features with positions adjusted to be fully non-overlapping
+    """
+    import bisect
+    import numpy as np
+
+    N = cell_features.shape[0]
+    if N <= 1:
+        return cell_features
+
+    pos = cell_features[:, 2:4].detach().clone()   # [N, 2]  x, y centres
+    w   = cell_features[:, CellFeatureIdx.WIDTH].detach().numpy()
+    h   = cell_features[:, CellFeatureIdx.HEIGHT].detach().numpy()
+    px  = pos[:, 0].numpy().copy()
+    py  = pos[:, 1].numpy().copy()
+
+    # Window half-widths for binary search: a cell j can only overlap cell i if
+    # |px[i]-px[j]| < (w[i]+w[j])/2 ≤ max_w.  Same logic for y.
+    max_w = float(w.max())
+    max_h = float(h.max())
+
+    for _sweep in range(3):
+        # --- x-pass: sort by x-centre, sweep right ---
+        # placed_px / placed_ids are kept sorted by current px so binary search
+        # always finds the right window using live (already-pushed) positions.
+        order = np.argsort(px)
+        placed_px: list[float] = []
+        placed_ids: list[int] = []
+
+        for k in range(N):
+            i = order[k]
+            # Keep pushing right until cell i is clear of all placed cells.
+            # After each push we break out of the inner scan and re-query so the
+            # new position is used — this avoids missing neighbors that only come
+            # into range after the push.
+            changed = True
+            while changed:
+                changed = False
+                lo = bisect.bisect_left(placed_px, px[i] - max_w)
+                hi = bisect.bisect_right(placed_px, px[i] + max_w)
+                for idx in range(lo, hi):
+                    j = placed_ids[idx]
+                    need_x = (w[i] + w[j]) / 2.0
+                    need_y = (h[i] + h[j]) / 2.0
+                    if abs(px[i] - px[j]) < need_x and abs(py[i] - py[j]) < need_y:
+                        px[i] = px[j] + need_x + 1e-4
+                        changed = True
+                        break  # re-query from new position
+
+            ins = bisect.bisect_left(placed_px, px[i])
+            placed_px.insert(ins, px[i])
+            placed_ids.insert(ins, i)
+
+        # --- y-pass: sort by y-centre, sweep up ---
+        order_y = np.argsort(py)
+        placed_py: list[float] = []
+        placed_ids_y: list[int] = []
+
+        for k in range(N):
+            i = order_y[k]
+            changed = True
+            while changed:
+                changed = False
+                lo = bisect.bisect_left(placed_py, py[i] - max_h)
+                hi = bisect.bisect_right(placed_py, py[i] + max_h)
+                for idx in range(lo, hi):
+                    j = placed_ids_y[idx]
+                    need_x = (w[i] + w[j]) / 2.0
+                    need_y = (h[i] + h[j]) / 2.0
+                    if abs(px[i] - px[j]) < need_x and abs(py[i] - py[j]) < need_y:
+                        py[i] = py[j] + need_y + 1e-4
+                        changed = True
+                        break
+
+            ins = bisect.bisect_left(placed_py, py[i])
+            placed_py.insert(ins, py[i])
+            placed_ids_y.insert(ins, i)
+
+    cell_features = cell_features.clone()
+    cell_features[:, CellFeatureIdx.X] = torch.tensor(px, dtype=cell_features.dtype)
+    cell_features[:, CellFeatureIdx.Y] = torch.tensor(py, dtype=cell_features.dtype)
+    return cell_features
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
+    num_epochs=2000,
+    lr=0.05,
     lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    lambda_overlap=50.0,
     verbose=True,
     log_interval=100,
 ):
     """Train the placement optimization using gradient descent.
 
+    Three-phase training strategy:
+      Phase 1 (0–50%):  lambda ramps 5% → 100% of target; gamma anneals 1.0 → 0.01.
+                         Density penalty dominates early so cells spread quickly.
+      Phase 2 (50–92%): lambda held at target; gamma anneals toward 0.01.
+                         WL optimisation sharpens while density keeps cells spread.
+      Phase 3 (92–100%): lambda drops to ~5–15% of target; gamma stays at 0.01.
+                          Near-zero density penalty lets WL pull cells together
+                          without causing new overlaps (cells are already well spread).
+    After training, legalize_placement() eliminates any residual overlaps.
+
     Args:
         cell_features: [N, 6] tensor with cell properties
         pin_features: [P, 7] tensor with pin properties
         edge_list: [E, 2] tensor with edge connectivity
-        num_epochs: Base number of optimization iterations (scaled by N internally)
-        lr: Learning rate for Adam optimizer
+        num_epochs: Base number of iterations (scaled internally by design size)
+        lr: Peak learning rate (cosine-annealed down to lr*0.01)
         lambda_wirelength: Weight for wirelength loss
-        lambda_overlap: Target weight for overlap loss (ramped up adaptively)
+        lambda_overlap: Target weight for overlap/density loss
         verbose: Whether to print progress
         log_interval: How often to print progress
 
     Returns:
         Dictionary with:
-            - final_cell_features: Optimized cell positions
+            - final_cell_features: Optimized and legalized cell positions
             - initial_cell_features: Original cell positions (for comparison)
             - loss_history: Loss values over time
     """
-    # Clone features and create learnable positions
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
 
@@ -382,83 +569,124 @@ def train_placement(
     w = cell_features[:, CellFeatureIdx.WIDTH]
     h = cell_features[:, CellFeatureIdx.HEIGHT]
     total_cell_area = (w * h).sum().item()
-    canvas_side = (total_cell_area * 1.2) ** 0.5
+    canvas_side = (total_cell_area * 1.35) ** 0.5
     half_canvas = canvas_side / 2.0
 
+    # Epoch scaling: larger designs need more iterations; bin density is cheaper
+    # per step than pairwise so we can afford to scale further.
+    # Cap raised to 5× and exponent bumped to 0.55 so N=10k gets ~5× the base
+    # epochs (vs the old 3×), giving the spreading phase enough room to complete.
     N_ref = 200
-    epoch_scale = max(1.0, min(2.0, (N / N_ref) ** 0.4))
+    epoch_scale = max(1.0, min(5.0, (N / N_ref) ** 0.55))
     effective_epochs = int(num_epochs * epoch_scale)
 
     cell_positions = cell_features[:, 2:4].clone().detach()
     cell_positions.requires_grad_(True)
 
+    # Nesterov SGD + cosine annealing: strong momentum helps escape saddle points
+    # during the high-lambda spreading phase; cosine schedule naturally transitions
+    # from coarse exploration to fine WL refinement.
     optimizer = optim.SGD([cell_positions], lr=lr, momentum=0.9, nesterov=True)
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=effective_epochs, eta_min=lr * 0.01
     )
 
-    # Track loss history
     loss_history = {
         "total_loss": [],
         "wirelength_loss": [],
         "overlap_loss": [],
     }
 
-    lambda_start = lambda_overlap * 0.1
-    ramp_epochs = int(effective_epochs * 0.6)
+    # Phase boundaries (as epoch fractions)
+    phase1_end = int(effective_epochs * 0.50)
+    phase2_end = int(effective_epochs * 0.92)  # was 0.85: extra time for spreading
 
-    # Training loop
+    lambda_start = lambda_overlap * 0.05   # begin with very light density penalty
+
     for epoch in range(effective_epochs):
         optimizer.zero_grad()
 
-        if epoch < ramp_epochs:
-            ramp_frac = epoch / max(1, ramp_epochs - 1)
-            lambda_t = lambda_start + (lambda_overlap - lambda_start) * ramp_frac
-        else:
+        # --- Adaptive lambda schedule ---
+        if epoch < phase1_end:
+            frac = epoch / max(1, phase1_end - 1)
+            lambda_t = lambda_start + (lambda_overlap - lambda_start) * frac
+        elif epoch < phase2_end:
             lambda_t = lambda_overlap
+        else:
+            # WL refinement phase: weaken density so cells can tighten up.
+            # Floor scales from 5% at N≈0 to 15% at N≥2000 — low enough to let
+            # WL dominate while still preventing catastrophic re-overlaps.
+            phase3_floor = min(0.15, 0.05 + 0.10 * min(1.0, N / 2000.0))
+            lambda_t = lambda_overlap * phase3_floor
+
+        # --- Gamma annealing: 1.0 → 0.01 (sharper HPWL approximation) ---
+        # Smaller gamma makes WA closer to true HPWL, tightening the WL signal.
+        total_frac = epoch / max(1, effective_epochs - 1)
+        gamma = max(0.01, 1.0 - 0.99 * total_frac)
 
         cell_features_current = cell_features.clone()
         cell_features_current[:, 2:4] = cell_positions
 
-        # Calculate losses
         wl_loss = wirelength_attraction_loss(
-            cell_features_current, pin_features, edge_list
+            cell_features_current, pin_features, edge_list, gamma=gamma
         )
         overlap_loss = overlap_repulsion_loss(
             cell_features_current, pin_features, edge_list
         )
 
-        # Combined loss with adaptive lambda
         total_loss = lambda_wirelength * wl_loss + lambda_t * overlap_loss
 
-        # Backward pass
         total_loss.backward()
 
-        # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
+        # Clip gradients: tighter clip in WL phase to prevent overshooting
+        max_norm = 5.0 if epoch < phase2_end else 2.0
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=max_norm)
 
-        # Update positions
         optimizer.step()
         scheduler.step()
 
         with torch.no_grad():
             cell_positions.clamp_(-half_canvas, half_canvas)
 
-        # Record losses
         loss_history["total_loss"].append(total_loss.item())
         loss_history["wirelength_loss"].append(wl_loss.item())
         loss_history["overlap_loss"].append(overlap_loss.item())
 
-        # Log progress
         if verbose and (epoch % log_interval == 0 or epoch == effective_epochs - 1):
-            print(f"Epoch {epoch}/{effective_epochs} (lambda={lambda_t:.3f}):")
+            print(f"Epoch {epoch}/{effective_epochs} "
+                  f"(lambda={lambda_t:.2f}, gamma={gamma:.3f}):")
             print(f"  Total Loss: {total_loss.item():.6f}")
             print(f"  Wirelength Loss: {wl_loss.item():.6f}")
             print(f"  Overlap Loss: {overlap_loss.item():.6f}")
 
-    # Create final cell features
+    # Pure WL cooldown: 200 epochs with no density penalty so cells can tighten
+    # around their nets.  A fresh optimizer avoids accumulated momentum from the
+    # main loop.  lr*0.02 is small enough to avoid displacing already-spread cells.
+    cooldown_lr = lr * 0.02
+    cooldown_optimizer = optim.SGD(
+        [cell_positions], lr=cooldown_lr, momentum=0.9, nesterov=True
+    )
+    for _cd in range(200):
+        cooldown_optimizer.zero_grad()
+        cell_features_current = cell_features.clone()
+        cell_features_current[:, 2:4] = cell_positions
+        wl_loss = wirelength_attraction_loss(
+            cell_features_current, pin_features, edge_list, gamma=0.01
+        )
+        wl_loss.backward()
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=0.3)
+        cooldown_optimizer.step()
+        with torch.no_grad():
+            cell_positions.clamp_(-half_canvas, half_canvas)
+
+    # Build final features from optimized positions
     final_cell_features = cell_features.clone()
     final_cell_features[:, 2:4] = cell_positions.detach()
+
+    # Legalization: deterministic O(N log N) sweep to guarantee zero overlap
+    if verbose:
+        print("\nRunning post-optimization legalization...")
+    final_cell_features = legalize_placement(final_cell_features)
 
     return {
         "final_cell_features": final_cell_features,
