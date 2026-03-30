@@ -32,7 +32,7 @@ We will review submissions on a rolling basis.
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
 | 1    |   example       | 0.5000      | 0.5             |  10         |   example submission |
-| 2    | Add Yours!      |             |                 |             |                      |
+| 2    | Pratul-Saini    | 0.0000      | 0.2753          |  854.03     |                      |
 
 
 
