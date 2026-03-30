@@ -46,15 +46,16 @@ We will review submissions on a rolling basis.
 | 13    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
 | 14   | Nawel Asgar    | 0.0000     | 0.5675          | 81.49      | Adaptive penalty scaling with cubic gradients and design-size optimization
 | 15   | Shiva Baghel     | 0.0000     | 0.5885          | 491.00      | Stable zero-overlap with balanced optimization      |
-| 16   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
-| 17    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
-| 18    | Zade Mahayni     | 0.00665     | 0.5157          |  127.4     | Will try again tomorrow |
-| 19    | Nithin Yanna    | 0.0148      | 0.5034          | 247.30s     | aggressive overlap penalty with quadratic scaling |
-| 20    | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |
-| 21    | Keya Gohil    | 0.0155      | 0.4678         | 1513.07     | Still working |
-| 22    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
-| 23    | partcl example  | 0.8         | 0.4             | 5           | example              |
-| 24    | Add Yours!      |             |                 |             |                      |
+| 16   | Rahul Nadkarni | 0.0000     | 0.7590         |    42.19    | DREAMPlace bin-density penalty (G×G grid,min(128, sqrt(N)*1.5)) replaces O(N²) pairwise loss3-phase lambda schedule: ramp → hold → small floor; gamma anneals 1.0→0.01 for sharper HPWL 200-epoch pure-WL SGD cooldown after main loop O(N log N) bisect legalizer (3 sweeps, live positions) guarantees zero overlap | 
+| 17   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
+| 18    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
+| 19    | Zade Mahayni     | 0.00665     | 0.5157          |  127.4     | Will try again tomorrow |
+| 20    | Nithin Yanna    | 0.0148      | 0.5034          | 247.30s     | aggressive overlap penalty with quadratic scaling |
+| 21    | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |
+| 22    | Keya Gohil    | 0.0155      | 0.4678         | 1513.07     | Still working |
+| 23    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
+| 24    | partcl example  | 0.8         | 0.4             | 5           | example              |
+| 25    | Add Yours!      |             |                 |             |                      |
 
 > **To add your results:**  
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.
