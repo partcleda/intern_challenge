@@ -44,7 +44,6 @@ from enum import IntEnum
 import torch
 import torch.optim as optim
 
-
 # Feature index enums for cleaner code access
 class CellFeatureIdx(IntEnum):
     """Indices for cell feature tensor columns."""
@@ -82,6 +81,26 @@ MAX_STANDARD_CELL_PINS = 6
 
 # Output directory
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Training Hyperparameters
+LR = 0.01
+PARETO_NUM_EPOCHS = 5000
+TRAINING_STAGES = {
+    "0": 32000,
+    "1": 8000,
+    "2": 20000,
+    "3": 10000,
+    "4": 10000,
+    "5": 30000,
+    "6": 50000,
+    "7": 15000
+}
+LAMBDA_WIRELENGTH = 100000000.0
+LAMBDA_OVERLAP = 65000000.0
+LAMBDA_PARETO = 1000.0  # 100.0
+LAMBDA_CENTERING = 1.0
+ALPHA_MANHATTAN = 0.1  # Smoothing parameter
+COS_LR_MIN_FCTR = 0.01
 
 # ======= SETUP =======
 
@@ -262,8 +281,8 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     Returns:
         Scalar loss value
     """
-    if edge_list.shape[0] == 0:
-        return torch.tensor(0.0, requires_grad=True)
+    # if edge_list.shape[0] == 0:
+    #     return torch.tensor(0.0, requires_grad=True)
 
     # Update absolute pin positions based on cell positions
     cell_positions = cell_features[:, 2:4]  # [N, 2]
@@ -284,21 +303,36 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
 
     # Calculate smooth approximation of Manhattan distance
     # Using log-sum-exp approximation for differentiability
-    alpha = 0.1  # Smoothing parameter
     dx = torch.abs(src_x - tgt_x)
     dy = torch.abs(src_y - tgt_y)
 
     # Smooth L1 distance with numerical stability
-    smooth_manhattan = alpha * torch.logsumexp(
-        torch.stack([dx / alpha, dy / alpha], dim=0), dim=0
+    smooth_manhattan = ALPHA_MANHATTAN * torch.logsumexp(
+        torch.stack([dx / ALPHA_MANHATTAN, dy / ALPHA_MANHATTAN], dim=0), dim=0
     )
 
     # Total wirelength
     total_wirelength = torch.sum(smooth_manhattan)
 
-    return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
+    # Normalize by number of edges
+    total_wirelength = total_wirelength / edge_list.shape[0]
+
+    return total_wirelength
 
 
+wirelength_attraction_loss_jit = torch.compile(wirelength_attraction_loss)
+
+
+@torch.compile
+def centering_regularization(cell_features, pin_features, edge_list):
+    """Calculate regularization term to center the cells on the chip."""
+    x = cell_features[:, CellFeatureIdx.X]
+    y = cell_features[:, CellFeatureIdx.Y]
+    centering_reg = LAMBDA_CENTERING * (torch.sum((x**2 + y**2)**0.5) / x.shape[0])
+    return centering_reg
+
+
+@torch.compile
 def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     """Calculate loss to prevent cell overlaps.
 
@@ -343,31 +377,43 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     Returns:
         Scalar loss value (should be 0 when no overlaps exist)
     """
-    N = cell_features.shape[0]
-    if N <= 1:
-        return torch.tensor(0.0, requires_grad=True)
+    def calculate_overlap_1d(x_or_y, w_or_h):
+        overlap = (w_or_h.unsqueeze(0) + w_or_h.unsqueeze(1)) / 2.
+        overlap = overlap - torch.abs(x_or_y.unsqueeze(0) - x_or_y.unsqueeze(1))
+        overlap = torch.relu(overlap)
+        overlap = torch.triu(overlap, diagonal=1)
+        return overlap
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    # N = cell_features.shape[0]
+    # if N <= 1:
+    #     return torch.tensor(0.0, requires_grad=True)
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    # areas = cell_features[:, CellFeatureIdx.AREA]  # = areas
+    # num_pins = cell_features[:, CellFeatureIdx.NUM_PINS] = num_pins_per_cell.float()
+    x = cell_features[:, CellFeatureIdx.X]
+    y = cell_features[:, CellFeatureIdx.Y]
+    w = cell_features[:, CellFeatureIdx.WIDTH]
+    h = cell_features[:, CellFeatureIdx.HEIGHT]
+
+    overlap_x = calculate_overlap_1d(x, w)
+    overlap_y = calculate_overlap_1d(y, h)
+
+    loss = overlap_x * overlap_y
+    # loss = torch.mean(loss)
+    num_non_zero = (loss != 0).sum().clamp(min=1)
+    loss = loss.sum() / num_non_zero
+
+    return loss
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
-    lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    num_epochs=None,
+    lr=LR,
+    lambda_wirelength=LAMBDA_WIRELENGTH,
+    lambda_overlap=LAMBDA_OVERLAP,
     verbose=True,
     log_interval=100,
 ):
@@ -390,6 +436,72 @@ def train_placement(
             - initial_cell_features: Original cell positions (for comparison)
             - loss_history: Loss values over time
     """
+    N = cell_features.shape[0]
+
+    def pareto_alternating_optimization(training_stage, epoch_curr):
+        """Alternate objectives to find an optimal solution within the Pareto front."""
+        nonlocal scheduler
+        if (epoch_curr // PARETO_NUM_EPOCHS) % 2 == 0:
+            lambda_overlap_final = LAMBDA_PARETO if training_stage in {0, 2, 6} else lambda_overlap
+            lambda_wirelength_final = lambda_wirelength
+        else:
+            lambda_overlap_final = lambda_overlap
+            lambda_wirelength_final = LAMBDA_PARETO if training_stage in {0, 2, 6} else lambda_wirelength
+        if scheduler is not None:
+            scheduler = None
+        return lambda_overlap_final, lambda_wirelength_final
+
+    def overlap_optimization(training_stage):
+        """Prioritize overlap objective."""
+        nonlocal scheduler
+        lambda_overlap_final = lambda_overlap
+        lambda_wirelength_final = 0.
+        if scheduler is None and N >= 25 and training_stage in {5, 7}:
+            for pg in optimizer.param_groups:
+                pg['lr'] = lr
+            scheduler = optim.lr_scheduler.CosineAnnealingLR(
+                optimizer, T_max=get_stage_epochs(N, str(training_stage), TRAINING_STAGES), eta_min=lr * COS_LR_MIN_FCTR
+            )
+        return lambda_overlap_final, lambda_wirelength_final
+
+    def get_stage_epochs(N, training_stage, training_stages):
+        num_epochs_stage = training_stages[training_stage]
+        training_stage = int(training_stage)
+        if training_stage == 1:
+            if N < 50:
+                num_epochs_stage = 1500
+            elif N < 150:
+                num_epochs_stage = 4000
+            elif N < 250:
+                num_epochs_stage = 6000
+        elif training_stage in {3, 5, 7}:
+            if N < 150:
+                num_epochs_stage = 1000
+            elif N < 250:
+                num_epochs_stage = 2000
+        return num_epochs_stage
+
+    def get_cumulative_epochs(N, training_stages):
+        epoch_stages = set()
+        num_epochs_tot = 0
+        for training_stage in training_stages.keys():
+            num_epochs_tot += get_stage_epochs(N, training_stage, training_stages)
+            epoch_stages.add(num_epochs_tot)
+
+        return num_epochs_tot, epoch_stages
+
+    # @torch.compile
+    # def freeze_adam_state(optimizer, params):
+    #     for p in params:
+    #         # p.grad.zero_()
+    #         p.grad = None
+    #         state = optimizer.state[p]
+    #         if state:
+    #             state['exp_avg'].zero_()
+    #             state['exp_avg_sq'].zero_()
+    #             if 'max_exp_avg_sq' in state:
+    #                 state['max_exp_avg_sq'].zero_()
+
     # Clone features and create learnable positions
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
@@ -399,7 +511,25 @@ def train_placement(
     cell_positions.requires_grad_(True)
 
     # Create optimizer
-    optimizer = optim.Adam([cell_positions], lr=lr)
+    optimizer = optim.Adam([cell_positions], lr=lr)  #, foreach=False, fused=False)
+    # optimizer = optim.SGD([cell_positions], lr=lr)
+    scheduler = None
+    # scheduler = optim.lr_scheduler.CosineAnnealingLR(
+    #     optimizer, T_max=num_epochs, eta_min=lr*0.3
+    # )
+
+    # Initialize training stage and epochs
+    training_stage = 0
+    epoch_curr = 0
+    epoch_stages = None
+    if num_epochs is None:
+        num_epochs, epoch_stages = get_cumulative_epochs(N, TRAINING_STAGES)
+
+    # Initialize macro position freezing
+    freeze_macros = freeze_std_cells = False
+    areas = cell_features[:, CellFeatureIdx.AREA]
+    idx_macros = (areas >= MIN_MACRO_AREA) & (areas < MAX_MACRO_AREA)
+    idx_std_cells = torch.isin(areas, torch.tensor(STANDARD_CELL_AREAS))
 
     # Track loss history
     loss_history = {
@@ -416,30 +546,57 @@ def train_placement(
         cell_features_current = cell_features.clone()
         cell_features_current[:, 2:4] = cell_positions
 
+        # Update training stage and macro position freezing
+        if epoch in epoch_stages:
+            training_stage += 1
+            if training_stage == 3 or training_stage >= 5:
+                freeze_macros = False
+                if training_stage >= 6:
+                    freeze_std_cells = True
+            elif training_stage == 2 or training_stage == 4:
+                freeze_macros = True
+
+            epoch_curr = 0
+
+        # Set training hyperparams and optimization method
+        if training_stage % 2 == 0:
+            lambda_overlap_final, lambda_wirelength_final = pareto_alternating_optimization(training_stage, epoch_curr)
+        else:
+            lambda_overlap_final, lambda_wirelength_final = overlap_optimization(training_stage)
+
         # Calculate losses
-        wl_loss = wirelength_attraction_loss(
-            cell_features_current, pin_features, edge_list
-        )
-        overlap_loss = overlap_repulsion_loss(
-            cell_features_current, pin_features, edge_list
-        )
+        overlap_loss = overlap_repulsion_loss(cell_features_current, pin_features, edge_list)
+        wl_loss = wirelength_attraction_loss_jit(cell_features_current, pin_features, edge_list)
+        # Stage 0 should also regularize for centering the cells on the chip,
+        # as this leads to an easier manifold to optimize, and it reduces wirelength on average.
+        if training_stage in {0, 1}:
+            wl_loss += centering_regularization(cell_features_current, pin_features, edge_list)
 
         # Combined loss
-        total_loss = lambda_wirelength * wl_loss + lambda_overlap * overlap_loss
+        total_loss = lambda_wirelength_final * wl_loss + lambda_overlap_final * overlap_loss
 
         # Backward pass
         total_loss.backward()
 
         # Gradient clipping to prevent extreme updates
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
+        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=2.5)
+
+        # Freeze appropriate cell positions based on training stage
+        if freeze_macros:
+            cell_positions.grad[idx_macros] = 0.
+        elif freeze_std_cells:
+            cell_positions[idx_std_cells].grad = None
 
         # Update positions
         optimizer.step()
+        if scheduler is not None:
+            scheduler.step()
 
         # Record losses
-        loss_history["total_loss"].append(total_loss.item())
-        loss_history["wirelength_loss"].append(wl_loss.item())
-        loss_history["overlap_loss"].append(overlap_loss.item())
+        if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
+            loss_history["total_loss"].append(total_loss.item())
+            loss_history["wirelength_loss"].append(wl_loss.item())
+            loss_history["overlap_loss"].append(overlap_loss.item())
 
         # Log progress
         if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
@@ -447,6 +604,8 @@ def train_placement(
             print(f"  Total Loss: {total_loss.item():.6f}")
             print(f"  Wirelength Loss: {wl_loss.item():.6f}")
             print(f"  Overlap Loss: {overlap_loss.item():.6f}")
+
+        epoch_curr += 1
 
     # Create final cell features
     final_cell_features = cell_features.clone()

@@ -4,4 +4,7 @@
 *.gif
 *.bmp
 
+placement_experiments.py
+README_AND_NOTES.md
+
 **/__pycache__/**
