@@ -27,6 +27,7 @@ from placement import (
     calculate_normalized_metrics,
     generate_placement_input,
     train_placement,
+    plot_placement,
 )
 
 
@@ -80,6 +81,8 @@ def run_placement_test(
         num_macros, num_std_cells
     )
 
+    initial_cell_features = cell_features.clone()  # Keep a copy of initial features for metrics
+
     # Initialize positions with random spread
     total_cells = cell_features.shape[0]
     total_area = cell_features[:, 0].sum().item()
@@ -104,6 +107,8 @@ def run_placement_test(
     # Calculate final metrics using shared implementation
     final_cell_features = result["final_cell_features"]
     metrics = calculate_normalized_metrics(final_cell_features, pin_features, edge_list)
+
+    plot_placement(initial_cell_features, final_cell_features, filename=f"test-placement-plots/test_placement_{test_id}.png")
 
     return {
         "test_id": test_id,
