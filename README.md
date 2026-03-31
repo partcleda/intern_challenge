@@ -16,8 +16,8 @@ The deadline is when all intern slots for summer 2026 are filled. We will review
 
 1. **Fork this repository.**
 2. Solve the placement problem using your preferred tools or scripts.  
-3. Run the test script to evaluate your solution and obtain the overlap and wirelength metrics.  
-4. Submit a pull request with your updated leaderboard entry and instructions for me to access your actual submission (it's fine if it's public).  
+3. Run the first 10 tests to evaluate your solution and obtain the overlap and wirelength metrics. Report Average Overlap, Wirelength and total Runtime. *Test cases 11 and 12 are extra credit, give them a shot if you have some time.*  
+5. Submit a pull request with your updated leaderboard entry and instructions for me to access your actual submission (it's fine if it's public).
 
 Note: You can use any libraries or frameworks you like, but please ensure that your code is well-documented and easy to follow.  
 
@@ -27,30 +27,11 @@ You may submit multiple solutions to try and increase your score.
 
 We will review submissions on a rolling basis.
 
-## New Leaderboard (sorted by overlap)
+## Leaderboard (sorted by overlap)
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    |   example       | 0.5000      | 0.5             |  10         |   example submission |
-| 2    | Add Yours!      |             |                 |             |                      |
-
-
-- Gradient Clipping
-  - LR Scheduler
-- Wirelength loss
-- Make loss reflect the fact that every step in the "GAN" leads to a better final state.
-  - Currently, the loss doesn't reflect it much at all, but it does automatically get better with each "GAN" step.
-- Optimizer (and optim hyperparams)
-- "Budging it"
-
-- All valid permutations -> min of wirelength (except make it differentiable)
-
-
-## Leaderboard (sorted by overlap) (OLD; test suite has been updated; see above)
-
-| Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
-|------|-----------------|-------------|-----------------|-------------|----------------------|
-| 1    | Shashank Shriram  | 0.0000     | 0.1310          |  11.32      |   🏎️💥               |
+| 1    | Sidhartha Parhi   | 0.0000    | 0.2549          |   458.28     |  Multi-stage alternating optimization and initial centering regularization to find the Pareto Front. |
 | 2    | Brayden Rudisill  | 0.0000    | 0.2611          |   50.51     |   Timed on a mac air |
 | 3    | manuhalapeth      | 0.0000    | 0.2630          |  196.8      |                      |
 | 4    | Neil Teje         | 0.0000    | 0.2700          | 24.00s      |                      |
@@ -58,22 +39,23 @@ We will review submissions on a rolling basis.
 | 6    | William Pan     | 0.0000      | 0.2848          | 155.33s     |                      |
 | 7    | Ashmit Dutta    | 0.0000      | 0.2870          | 995.58      |  Spent my entire morning (12 am - 6 am) doing this :P       |
 | 8    | Pawan Paleja     | 0.0000      | 0.3311         | 1.74s     |   Implemented hint for loss func, cosine annealing on learning rate with warmup, std annealing on lambda weight. Used optuna to tune hyperparam. Tested on gh codespaces 2-core.                   |
-| 9    | Gabriel Del Monte  | 0.0000      | 0.3427          | 606.07      |                                                              |
-| 10    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |        
-| 11   | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
-| 12    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
-| 13    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
-| 14   | Nawel Asgar    | 0.0000     | 0.5675          | 81.49      | Adaptive penalty scaling with cubic gradients and design-size optimization
-| 15   | Shiva Baghel     | 0.0000     | 0.5885          | 491.00      | Stable zero-overlap with balanced optimization      |
-| 16   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
-| 17    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
-| 18    | Zade Mahayni     | 0.00665     | 0.5157          |  127.4     | Will try again tomorrow |
-| 19    | Nithin Yanna    | 0.0148      | 0.5034          | 247.30s     | aggressive overlap penalty with quadratic scaling |
-| 20    | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |
-| 21    | Keya Gohil    | 0.0155      | 0.4678         | 1513.07     | Still working |
-| 22    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
-| 23    | partcl example  | 0.8         | 0.4             | 5           | example              |
-| 24    | Add Yours!      |             |                 |             |                      |
+ 9   | Shashank Shriram  | 0.0000     | 0.3312          |  11.32      |   🏎️💥               |
+| 10    | Gabriel Del Monte  | 0.0000      | 0.3427          | 606.07      |                                                              |
+| 11    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |        
+| 12   | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
+| 13    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
+| 14    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
+| 15   | Nawel Asgar    | 0.0000     | 0.5675          | 81.49      | Adaptive penalty scaling with cubic gradients and design-size optimization
+| 16   | Shiva Baghel     | 0.0000     | 0.5885          | 491.00      | Stable zero-overlap with balanced optimization      |
+| 17   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
+| 18    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
+| 19    | Zade Mahayni     | 0.00665     | 0.5157          |  127.4     | Will try again tomorrow |
+| 20    | Nithin Yanna    | 0.0148      | 0.5034          | 247.30s     | aggressive overlap penalty with quadratic scaling |
+| 21    | Sean Ko         | 0.0271      |  .5138          | 31.83s      | lr increase, decrease epoch, increase lambda overlap and decreased lambda wire_length + log penalty loss |
+| 22    | Keya Gohil    | 0.0155      | 0.4678         | 1513.07     | Still working |
+| 23    | Prithvi Seran   | 0.0499      | 0.4890          | 398.58      |                      |
+| 24    | partcl example  | 0.8         | 0.4             | 5           | example              |
+| 25    | Add Yours!      |             |                 |             |                      |
 
 > **To add your results:**  
 > Insert a new row in the table above with your name, overlap, wirelength, and any notes. Ensure you sort by overlap.
