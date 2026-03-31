@@ -106,7 +106,7 @@ def compute_bfs_scores_from_macros(adjacency, macro_indices, num_cells, decay=0.
                     continue
 
                 visited.add(neighbor)
-                scores[m, neighbor] += neighbor_decay
+                scores[m, neighbor] = neighbor_decay
 
                 if neighbor in macro_set:
                     # Boundary reached — score recorded, do not expand

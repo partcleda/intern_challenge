@@ -24,14 +24,14 @@ Note: You can use any libraries or frameworks you like, but please ensure that y
 Also, if you think there are any bugs in the provided code, feel free to fix them and mention the changes in your submission.  
 
 You may submit multiple solutions to try and increase your score.
-
+06
 We will review submissions on a rolling basis.
 
 ## Leaderboard (sorted by overlap)
 
 | Rank | Name            | Overlap     | Wirelength (um) | Runtime (s) | Notes                |
 |------|-----------------|-------------|-----------------|-------------|----------------------|
-| 0    | Pratul-Saini    |  0.0000     | 0.2540          | 480.98s     | Moved some pre-existing computation to GPU. Created some initialization based on connectivity heuristic, added warmup on wirelength, cosine annealing on learning rate. Only ran on first 10 tests for scoring purposes. I separately ran test 11 and placed its results in test-11.txt. Test 12 requires optimization on the problem generation (computing 10^10 overlap values in initial metrics) front seems like as that's where I see hanging.     |
+| 0    | Pratul-Saini    |  0.0000     | 0.2537          | 490.06s     | Moved some pre-existing computation to GPU. Created some initialization based on connectivity heuristic, added warmup on wirelength, cosine annealing on learning rate. Only ran on first 10 tests for scoring purposes. I separately ran test 11 and placed its results in test-11.txt. Test 12 requires optimization on the problem generation (computing 10^10 overlap values in initial metrics) front seems like as that's where I see hanging.     |
 | 1    | Brayden Rudisill  | 0.0000    | 0.2611          |   50.51     |   Timed on a mac air |
 | 2    | manuhalapeth      | 0.0000    | 0.2630          |  196.8      |                      |
 | 3    | Neil Teje         | 0.0000    | 0.2700          | 24.00s      |                      |

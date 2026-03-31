@@ -43,7 +43,7 @@ import os
 import torch
 import torch.optim as optim
 
-from constants import MIN_MACRO_AREA, MAX_MACRO_AREA, STANDARD_CELL_AREAS, STANDARD_CELL_HEIGHT, MIN_STANDARD_CELL_PINS, MAX_STANDARD_CELL_PINS
+from constants import MIN_MACRO_AREA, MAX_MACRO_AREA, STANDARD_CELL_AREAS, STANDARD_CELL_HEIGHT, MIN_STANDARD_CELL_PINS, MAX_STANDARD_CELL_PINS, PIN_SIZE
 from data import CellFeatureIdx, PinFeatureIdx
 from initialization import initialize_placement
 
@@ -124,7 +124,6 @@ def generate_placement_input(num_macros, num_std_cells):
     pin_features = torch.zeros(total_pins, 7)
 
     # Fixed pin size for all pins (square pins)
-    PIN_SIZE = 0.1  # All pins are 0.1 x 0.1
 
     pin_idx = 0
     for cell_idx in range(total_cells):
@@ -291,7 +290,7 @@ def train_placement(
     pin_features,
     edge_list,
     num_epochs=20000,
-    lr=0.1,
+    lr=0.2,
     lambda_wirelength=5.0,
     lambda_overlap=1000.0,
     warmup_fraction=0.15,
