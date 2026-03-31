@@ -294,7 +294,7 @@ def train_placement(
     lr=0.1,
     lambda_wirelength=5.0,
     lambda_overlap=1000.0,
-    warmup_fraction=0.2,
+    warmup_fraction=0.15,
     verbose=True,
     log_interval=100,
 ):
