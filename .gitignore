@@ -4,4 +4,9 @@
 *.gif
 *.bmp
 
+.DS_Store
+uv.lock
+
+.claude/
+
 **/__pycache__/**
