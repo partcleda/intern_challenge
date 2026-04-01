@@ -128,11 +128,16 @@ def order_std_cells(score_matrix, std_indices):
     Returns:
         ordered: List[int], indices into std_indices in packing order
     """
+    # get std cell scores only
     std_scores = score_matrix[:, std_indices]  # [M, S]
+    # identify the primary macro for each std cell
     primary = torch.argmax(std_scores, dim=0)  # [S]
+    # get the score for each std cell's primary macro - this is affinity
     affinity = std_scores.gather(0, primary.unsqueeze(0)).squeeze(0)
 
+    # The primary is an integer while the affinity is a normalized value in [0, 1]. This determines the macro grouping and ordering within each group respectively. Not a very strong ordering, but should be sufficient for a simple initialisation.
     sort_key = primary.float() - affinity / (affinity.max() + 1e-12)
+    # Sort based on the above
     return torch.argsort(sort_key).tolist()
 
 
@@ -155,10 +160,12 @@ def pack_std_cells(order, std_indices, cell_features,
     cell_features = cell_features.clone()
     widths = cell_features[std_indices, CellFeatureIdx.WIDTH]
 
+    # Compute how many rows we need and the width of each row
     total_width = widths.sum().item()
     num_rows = max(1, int(total_width ** 0.5 / row_height))
     row_width = total_width / num_rows
 
+    # Cursor tracks the center of the leftmost edge of each std cell. Note row_height of all std cells is 1
     cursor_x = 0.0
     cursor_y = row_height / 2
 
@@ -166,6 +173,7 @@ def pack_std_cells(order, std_indices, cell_features,
         idx = std_indices[s]
         w = widths[s].item()
 
+        # if the next cell doesn't fit in the current row, move cursor to the start of the next row
         if cursor_x + w > row_width:
             cursor_y += row_height + spacing
             cursor_x = 0.0
@@ -174,6 +182,7 @@ def pack_std_cells(order, std_indices, cell_features,
         cell_features[idx, CellFeatureIdx.Y] = cursor_y
         cursor_x += w + spacing
 
+    # define the bounding box of the packed std cells for macro placement reference and virtual macro creation
     std_x = cell_features[std_indices, CellFeatureIdx.X]
     std_y = cell_features[std_indices, CellFeatureIdx.Y]
     std_w = cell_features[std_indices, CellFeatureIdx.WIDTH]
@@ -191,34 +200,47 @@ def place_macros_around_block(score_matrix, macro_indices, std_indices,
                               cell_features, bbox, standoff=5.0):
     """
     Place each macro outside the std cell block, on the side
-    where its most connected std cells live.
+    where its most connected std cells live. Macros can overlap
     """
+    # extract coordinates of bounding box of std cells
     x_min, x_max, y_min, y_max = bbox
+
+    # compute center of the bounding box for reference
     cx = (x_min + x_max) / 2
     cy = (y_min + y_max) / 2
+
+    # extract coordinates of std cells
     std_xy = cell_features[std_indices][:, [CellFeatureIdx.X, CellFeatureIdx.Y]]
 
     cell_features = cell_features.clone()
 
     for m, macro_idx in enumerate(macro_indices):
+        # Compute the weighted average position of the std cells, using BFS scores as weights.
         weights = score_matrix[m, std_indices]
         w_sum = weights.sum().clamp(min=1e-12)
         target = (weights @ std_xy) / w_sum
 
+        # Compute delta from center of bounding box to macro target vector
         dx = target[0] - cx
         dy = target[1] - cy
+        # compute length of delta vector
         length = (dx**2 + dy**2).sqrt().clamp(min=1e-12)
+        # normalize delta vector
         dx, dy = dx / length, dy / length
 
+        # extract macro dimensions and compute at least how far horizontally and vertically the macro must be from the bounding box to avoid overlap, plus standoff
         mw = cell_features[macro_idx, CellFeatureIdx.WIDTH].item()
         mh = cell_features[macro_idx, CellFeatureIdx.HEIGHT].item()
         half_w = (x_max - x_min) / 2 + mw / 2 + standoff
         half_h = (y_max - y_min) / 2 + mh / 2 + standoff
 
+        # compute horizontally and vertically how far the macro must travel alogn the delta vector to avoid overlap
         t_x = half_w / abs(dx) if abs(dx) > 1e-12 else float('inf')
         t_y = half_h / abs(dy) if abs(dy) > 1e-12 else float('inf')
+        # Given a box the macro must be contained in, we look for the smallest scaling factor t that moves the macro outside the box along the delta vector
         t = min(t_x, t_y)
 
+        # shift macro from center of bounding box to projected position outside the bounding box
         cell_features[macro_idx, CellFeatureIdx.X] = cx + dx * t
         cell_features[macro_idx, CellFeatureIdx.Y] = cy + dy * t
 
