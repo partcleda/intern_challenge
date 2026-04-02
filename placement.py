@@ -415,24 +415,19 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, grid_size=Non
 
 
 def legalize_placement(cell_features):
-    """Remove any residual overlaps with a greedy sweep — guarantees zero overlap.
+    """Min-displacement legalization using Abacus row packing for standard cells.
 
-    After gradient optimisation, tiny floating-point overlaps may remain. This
-    function performs a deterministic, O(N log N) legalization:
+    Replaces the old push-right-only sweep with a strategy that keeps cells as
+    close as possible to their gradient-optimised positions, preserving WL gains:
 
-    1. Sort cells by x-centre.
-    2. For each cell in order, do a binary-search window query over a sorted list
-       of already-placed cells to find all candidates whose x-centre is within
-       max_w of cell i.  Push cell i right until it clears every candidate,
-       re-querying after each push so the new position is used immediately.
-    3. A second pass along y handles any stubborn vertical overlaps.
-    4. The x+y sweep pair is repeated 3 times to resolve macro–std-cell boundary
-       re-overlaps that a single pass can introduce.
-
-    Using a sorted-insertion list (bisect) instead of an O(N) inner scan reduces
-    each sweep from O(N²) to O(N log N + N·k) where k is the average number of
-    overlapping neighbours (≈ 1–5 after optimisation).  Critically, every query
-    uses the cell's CURRENT position — no stale spatial-index issue.
+    1. Macros (h > 1.5): placed largest-first with a bidirectional radial search
+       that finds the nearest valid position in any direction rather than always
+       pushing right.
+    2. Standard cells (h == 1.0): snapped to horizontal rows (pitch = 1.0) and
+       packed within each row via the Abacus cluster algorithm, which minimises
+       sum |x_placed - x_opt| subject to left-to-right non-overlap.
+    3. Three x+y sweep pairs (same as the original) resolve any residual
+       macro–std-cell boundary overlaps after the row packing.
 
     Args:
         cell_features: [N, 6] tensor (modified in-place and returned)
@@ -442,67 +437,149 @@ def legalize_placement(cell_features):
     """
     import bisect
     import numpy as np
+    from collections import defaultdict
 
     N = cell_features.shape[0]
     if N <= 1:
         return cell_features
 
-    pos = cell_features[:, 2:4].detach().clone()   # [N, 2]  x, y centres
-    w   = cell_features[:, CellFeatureIdx.WIDTH].detach().numpy()
-    h   = cell_features[:, CellFeatureIdx.HEIGHT].detach().numpy()
-    px  = pos[:, 0].numpy().copy()
-    py  = pos[:, 1].numpy().copy()
+    px_opt = cell_features[:, CellFeatureIdx.X].detach().numpy().copy()
+    py_opt = cell_features[:, CellFeatureIdx.Y].detach().numpy().copy()
+    w = cell_features[:, CellFeatureIdx.WIDTH].detach().numpy()
+    h = cell_features[:, CellFeatureIdx.HEIGHT].detach().numpy()
 
-    # Window half-widths for binary search: a cell j can only overlap cell i if
-    # |px[i]-px[j]| < (w[i]+w[j])/2 ≤ max_w.  Same logic for y.
-    max_w = float(w.max())
-    max_h = float(h.max())
+    px = px_opt.copy()
+    py = py_opt.copy()
+
+    macro_mask = h > STANDARD_CELL_HEIGHT + 0.5
+    macro_ids  = np.where(macro_mask)[0]
+    std_ids    = np.where(~macro_mask)[0]
+
+    total_cell_area = float((w * h).sum())
+    canvas_side = (total_cell_area * 1.35) ** 0.5
+    half_canvas = canvas_side / 2.0
+
+    macro_order = macro_ids[np.argsort(-(w[macro_ids] * h[macro_ids]))]
+    placed_boxes: list[tuple[float, float, float, float]] = []  
+
+    def overlaps_placed(cx: float, cy: float, hwi: float, hhi: float) -> bool:
+        for bx, by, bhw, bhh in placed_boxes:
+            if abs(cx - bx) < hwi + bhw and abs(cy - by) < hhi + bhh:
+                return True
+        return False
+
+    for i in macro_order:
+        hwi = w[i] / 2.0
+        hhi = h[i] / 2.0
+        x0, y0 = px_opt[i], py_opt[i]
+
+        if not overlaps_placed(x0, y0, hwi, hhi):
+            placed_boxes.append((x0, y0, hwi, hhi))
+            continue
+        step = max(w[i], h[i]) * 0.5
+        angles = [0, np.pi, np.pi / 2, -np.pi / 2,
+                  np.pi / 4, -np.pi / 4, 3 * np.pi / 4, -3 * np.pi / 4]
+        found = False
+        for mult in range(1, 80):
+            r = step * mult
+            cands = sorted(
+                [(x0 + r * np.cos(a), y0 + r * np.sin(a)) for a in angles],
+                key=lambda c: (c[0] - x0) ** 2 + (c[1] - y0) ** 2,
+            )
+            for cx, cy in cands:
+                if not overlaps_placed(cx, cy, hwi, hhi):
+                    px[i], py[i] = cx, cy
+                    placed_boxes.append((cx, cy, hwi, hhi))
+                    found = True
+                    break
+            if found:
+                break
+        if not found:
+            max_right = max((bx + bhw for bx, _, bhw, _ in placed_boxes), default=x0)
+            px[i] = max_right + hwi + 1e-4
+            placed_boxes.append((px[i], py[i], hwi, hhi))
+
+    rows: dict[int, list[int]] = defaultdict(list)
+    for i in std_ids:
+        row_idx = int(round(py_opt[i] / STANDARD_CELL_HEIGHT))
+        rows[row_idx].append(int(i))
+
+    for row_idx, cell_ids in rows.items():
+        row_y = row_idx * STANDARD_CELL_HEIGHT
+        cell_ids_sorted = sorted(cell_ids, key=lambda ci: px_opt[ci])
+
+        clusters: list[list] = []  
+
+        for ci in cell_ids_sorted:
+            wi = w[ci]
+            new_cluster: list = [px_opt[ci] - wi / 2.0, [ci], wi]
+
+            while clusters:
+                prev = clusters[-1]
+                if prev[0] + prev[2] > new_cluster[0]:
+                    merged_ids = prev[1] + new_cluster[1]
+                    merged_w   = prev[2] + new_cluster[2]
+                    cum = 0.0
+                    anchors = []
+                    for mid in merged_ids:
+                        anchors.append(px_opt[mid] - w[mid] / 2.0 - cum)
+                        cum += w[mid]
+                    opt_x = float(np.median(anchors))
+                    min_x = clusters[-2][0] + clusters[-2][2] if len(clusters) >= 2 else -half_canvas
+                    opt_x = max(opt_x, min_x)
+                    opt_x = min(opt_x, half_canvas - merged_w)
+                    clusters.pop()
+                    new_cluster = [opt_x, merged_ids, merged_w]
+                else:
+                    break
+
+            clusters.append(new_cluster)
+
+        for x_start, ids_in_cluster, _ in clusters:
+            cum = 0.0
+            for ci in ids_in_cluster:
+                px[ci] = x_start + cum + w[ci] / 2.0
+                py[ci] = row_y
+                cum += w[ci]
+    max_w_all = float(w.max())
+    max_h_all = float(h.max())
 
     for _sweep in range(3):
-        # --- x-pass: sort by x-centre, sweep right ---
-        # placed_px / placed_ids are kept sorted by current px so binary search
-        # always finds the right window using live (already-pushed) positions.
         order = np.argsort(px)
         placed_px: list[float] = []
         placed_ids: list[int] = []
 
         for k in range(N):
-            i = order[k]
-            # Keep pushing right until cell i is clear of all placed cells.
-            # After each push we break out of the inner scan and re-query so the
-            # new position is used — this avoids missing neighbors that only come
-            # into range after the push.
+            i = int(order[k])
             changed = True
             while changed:
                 changed = False
-                lo = bisect.bisect_left(placed_px, px[i] - max_w)
-                hi = bisect.bisect_right(placed_px, px[i] + max_w)
-                for idx in range(lo, hi):
+                lo   = bisect.bisect_left(placed_px,  px[i] - max_w_all)
+                hi_b = bisect.bisect_right(placed_px, px[i] + max_w_all)
+                for idx in range(lo, hi_b):
                     j = placed_ids[idx]
                     need_x = (w[i] + w[j]) / 2.0
                     need_y = (h[i] + h[j]) / 2.0
                     if abs(px[i] - px[j]) < need_x and abs(py[i] - py[j]) < need_y:
                         px[i] = px[j] + need_x + 1e-4
                         changed = True
-                        break  # re-query from new position
-
+                        break
             ins = bisect.bisect_left(placed_px, px[i])
             placed_px.insert(ins, px[i])
             placed_ids.insert(ins, i)
 
-        # --- y-pass: sort by y-centre, sweep up ---
         order_y = np.argsort(py)
         placed_py: list[float] = []
         placed_ids_y: list[int] = []
 
         for k in range(N):
-            i = order_y[k]
+            i = int(order_y[k])
             changed = True
             while changed:
                 changed = False
-                lo = bisect.bisect_left(placed_py, py[i] - max_h)
-                hi = bisect.bisect_right(placed_py, py[i] + max_h)
-                for idx in range(lo, hi):
+                lo   = bisect.bisect_left(placed_py,  py[i] - max_h_all)
+                hi_b = bisect.bisect_right(placed_py, py[i] + max_h_all)
+                for idx in range(lo, hi_b):
                     j = placed_ids_y[idx]
                     need_x = (w[i] + w[j]) / 2.0
                     need_y = (h[i] + h[j]) / 2.0
@@ -510,10 +587,154 @@ def legalize_placement(cell_features):
                         py[i] = py[j] + need_y + 1e-4
                         changed = True
                         break
-
             ins = bisect.bisect_left(placed_py, py[i])
             placed_py.insert(ins, py[i])
             placed_ids_y.insert(ins, i)
+
+    cell_features = cell_features.clone()
+    cell_features[:, CellFeatureIdx.X] = torch.tensor(px, dtype=cell_features.dtype)
+    cell_features[:, CellFeatureIdx.Y] = torch.tensor(py, dtype=cell_features.dtype)
+    return cell_features
+
+
+def local_swap_optimization(cell_features, pin_features, edge_list, num_passes=3, k=8):
+    """Post-legalization local pairwise cell swap to reduce HPWL.
+
+    For each cell, tries swapping positions with up to k nearest neighbours.
+    A swap is accepted only if it (a) strictly reduces total HPWL and (b) does
+    not introduce any new overlaps — verified via a KD-tree neighbourhood query
+    around both new positions before committing the swap.
+
+    This step never touches the overlap count: every accepted swap is checked
+    for safety first, so the placement stays fully legal throughout.
+
+    Skipped for very large designs (N > 10 000) to keep runtime bounded.
+
+    Args:
+        cell_features: [N, 6] tensor with legalised cell positions
+        pin_features:  [P, 7] tensor with pin information
+        edge_list:     [E, 2] tensor with 2-pin net edges
+        num_passes:    number of full sweeps over all cells (default 3)
+        k:             nearest neighbours to consider per cell (default 8)
+
+    Returns:
+        Updated cell_features with equal or better WL, guaranteed still legal
+    """
+    try:
+        from scipy.spatial import KDTree
+    except ImportError:
+        return cell_features
+
+    import numpy as np
+
+    N = cell_features.shape[0]
+    if N <= 2 or edge_list.shape[0] == 0:
+        return cell_features
+
+    if N > 10000:
+        return cell_features
+    elif N > 2000:
+        k = min(k, 8)
+        num_passes = min(num_passes, 3)
+    elif N > 500:
+        k = min(k, 10)
+        num_passes = min(num_passes, 4)
+    else:
+        k = min(k + 4, 12)     
+        num_passes = min(num_passes + 2, 5)
+
+    px = cell_features[:, CellFeatureIdx.X].detach().numpy().copy()
+    py = cell_features[:, CellFeatureIdx.Y].detach().numpy().copy()
+    w  = cell_features[:, CellFeatureIdx.WIDTH].detach().numpy()
+    h  = cell_features[:, CellFeatureIdx.HEIGHT].detach().numpy()
+
+    E = edge_list.shape[0]
+    src_pins     = edge_list[:, 0].numpy().astype(int)
+    tgt_pins     = edge_list[:, 1].numpy().astype(int)
+    cell_idx_arr = pin_features[:, PinFeatureIdx.CELL_IDX].numpy().astype(int)
+    pin_rel_x    = pin_features[:, PinFeatureIdx.PIN_X].numpy()
+    pin_rel_y    = pin_features[:, PinFeatureIdx.PIN_Y].numpy()
+
+    net_ci0 = cell_idx_arr[src_pins]
+    net_ci1 = cell_idx_arr[tgt_pins]
+    net_rx0 = pin_rel_x[src_pins]
+    net_ry0 = pin_rel_y[src_pins]
+    net_rx1 = pin_rel_x[tgt_pins]
+    net_ry1 = pin_rel_y[tgt_pins]
+
+    cell_nets: list[list[int]] = [[] for _ in range(N)]
+    for e in range(E):
+        c0, c1 = int(net_ci0[e]), int(net_ci1[e])
+        cell_nets[c0].append(e)
+        if c1 != c0:
+            cell_nets[c1].append(e)
+
+    def hpwl_delta(i: int, j: int, nets: list[int]) -> float:
+        xi, yi = px[i], py[i]
+        xj, yj = px[j], py[j]
+        delta = 0.0
+        for e in nets:
+            c0, c1 = int(net_ci0[e]), int(net_ci1[e])
+            ax0 = px[c0] + net_rx0[e];  ay0 = py[c0] + net_ry0[e]
+            ax1 = px[c1] + net_rx1[e];  ay1 = py[c1] + net_ry1[e]
+            bx0 = (xj if c0 == i else (xi if c0 == j else px[c0])) + net_rx0[e]
+            by0 = (yj if c0 == i else (yi if c0 == j else py[c0])) + net_ry0[e]
+            bx1 = (xj if c1 == i else (xi if c1 == j else px[c1])) + net_rx1[e]
+            by1 = (yj if c1 == i else (yi if c1 == j else py[c1])) + net_ry1[e]
+            delta += (abs(bx1 - bx0) + abs(by1 - by0)
+                      - abs(ax1 - ax0) - abs(ay1 - ay0))
+        return delta
+
+    for _ in range(num_passes):
+        centers = np.stack([px, py], axis=1)
+        tree = KDTree(centers)
+
+        for i in range(N):
+            _, nbrs = tree.query([px[i], py[i]], k=min(k + 1, N))
+
+            best_delta = 0.0
+            best_j = -1
+
+            for j in map(int, nbrs):
+                if j == i:
+                    continue
+                nets = list(set(cell_nets[i] + cell_nets[j]))
+                if not nets:
+                    continue
+                d = hpwl_delta(i, j, nets)
+                if d < best_delta:
+                    best_delta = d
+                    best_j = j
+
+            if best_j < 0:
+                continue
+
+            if abs(h[i] - h[best_j]) > 0.5:
+                continue
+
+            xi_new, yi_new = px[best_j], py[best_j]
+            xj_new, yj_new = px[i], py[i]
+            wi, hi_c = w[i], h[i]
+            wj, hj   = w[best_j], h[best_j]
+
+            safe = True
+            for (cx, cy, cw, ch) in [(xi_new, yi_new, wi, hi_c),
+                                      (xj_new, yj_new, wj, hj)]:
+                _, near = tree.query([cx, cy], k=min(30, N))
+                for m in map(int, near):
+                    if m == i or m == best_j:
+                        continue
+                    xm, ym, wm, hm = px[m], py[m], w[m], h[m]
+                    if (abs(cx - xm) < (cw + wm) / 2 and
+                            abs(cy - ym) < (ch + hm) / 2):
+                        safe = False
+                        break
+                if not safe:
+                    break
+
+            if safe:
+                px[i], px[best_j] = px[best_j], px[i]
+                py[i], py[best_j] = py[best_j], py[i]
 
     cell_features = cell_features.clone()
     cell_features[:, CellFeatureIdx.X] = torch.tensor(px, dtype=cell_features.dtype)
@@ -561,6 +782,8 @@ def train_placement(
             - initial_cell_features: Original cell positions (for comparison)
             - loss_history: Loss values over time
     """
+    import math as _math
+
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
 
@@ -572,127 +795,161 @@ def train_placement(
     canvas_side = (total_cell_area * 1.35) ** 0.5
     half_canvas = canvas_side / 2.0
 
-    # Epoch scaling: larger designs need more iterations; bin density is cheaper
-    # per step than pairwise so we can afford to scale further.
-    # Cap raised to 5× and exponent bumped to 0.55 so N=10k gets ~5× the base
-    # epochs (vs the old 3×), giving the spreading phase enough room to complete.
     N_ref = 200
     epoch_scale = max(1.0, min(5.0, (N / N_ref) ** 0.55))
     effective_epochs = int(num_epochs * epoch_scale)
 
-    cell_positions = cell_features[:, 2:4].clone().detach()
-    cell_positions.requires_grad_(True)
 
-    # Nesterov SGD + cosine annealing: strong momentum helps escape saddle points
-    # during the high-lambda spreading phase; cosine schedule naturally transitions
-    # from coarse exploration to fine WL refinement.
-    optimizer = optim.SGD([cell_positions], lr=lr, momentum=0.9, nesterov=True)
-    scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=effective_epochs, eta_min=lr * 0.01
-    )
+    num_restarts = 5 if N <= 300 else 1
 
-    loss_history = {
-        "total_loss": [],
-        "wirelength_loss": [],
-        "overlap_loss": [],
-    }
+    wl_refine_epochs = max(200, int(200 * (N / 100) ** 0.40))
 
-    # Phase boundaries (as epoch fractions)
-    phase1_end = int(effective_epochs * 0.50)
-    phase2_end = int(effective_epochs * 0.92)  # was 0.85: extra time for spreading
+    best_wl = float("inf")
+    best_result = None
 
-    lambda_start = lambda_overlap * 0.05   # begin with very light density penalty
-
-    for epoch in range(effective_epochs):
-        optimizer.zero_grad()
-
-        # --- Adaptive lambda schedule ---
-        if epoch < phase1_end:
-            frac = epoch / max(1, phase1_end - 1)
-            lambda_t = lambda_start + (lambda_overlap - lambda_start) * frac
-        elif epoch < phase2_end:
-            lambda_t = lambda_overlap
+    for restart_idx in range(num_restarts):
+        if restart_idx == 0:
+            cell_positions = cell_features[:, 2:4].clone().detach()
         else:
-            # WL refinement phase: weaken density so cells can tighten up.
-            # Floor scales from 5% at N≈0 to 15% at N≥2000 — low enough to let
-            # WL dominate while still preventing catastrophic re-overlaps.
-            phase3_floor = min(0.15, 0.05 + 0.10 * min(1.0, N / 2000.0))
-            lambda_t = lambda_overlap * phase3_floor
+            torch.manual_seed(restart_idx * 7919 + N)   
+            spread = half_canvas * 0.60
+            angles = torch.rand(N) * 2.0 * _math.pi
+            radii  = torch.rand(N) * spread
+            cell_positions = torch.stack(
+                [radii * torch.cos(angles), radii * torch.sin(angles)], dim=1
+            )
+        cell_positions = cell_positions.requires_grad_(True)
 
-        # --- Gamma annealing: 1.0 → 0.01 (sharper HPWL approximation) ---
-        # Smaller gamma makes WA closer to true HPWL, tightening the WL signal.
-        total_frac = epoch / max(1, effective_epochs - 1)
-        gamma = max(0.01, 1.0 - 0.99 * total_frac)
-
-        cell_features_current = cell_features.clone()
-        cell_features_current[:, 2:4] = cell_positions
-
-        wl_loss = wirelength_attraction_loss(
-            cell_features_current, pin_features, edge_list, gamma=gamma
-        )
-        overlap_loss = overlap_repulsion_loss(
-            cell_features_current, pin_features, edge_list
+        # Nesterov SGD + cosine annealing.
+        optimizer = optim.SGD([cell_positions], lr=lr, momentum=0.9, nesterov=True)
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=effective_epochs, eta_min=lr * 0.01
         )
 
-        total_loss = lambda_wirelength * wl_loss + lambda_t * overlap_loss
+        loss_history = {
+            "total_loss": [],
+            "wirelength_loss": [],
+            "overlap_loss": [],
+        }
 
-        total_loss.backward()
+        phase1_end = int(effective_epochs * 0.50)
+        phase2_end = int(effective_epochs * 0.92)
+        lambda_start = lambda_overlap * 0.05
 
-        # Clip gradients: tighter clip in WL phase to prevent overshooting
-        max_norm = 5.0 if epoch < phase2_end else 2.0
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=max_norm)
+        for epoch in range(effective_epochs):
+            optimizer.zero_grad()
 
-        optimizer.step()
-        scheduler.step()
+            if epoch < phase1_end:
+                frac = epoch / max(1, phase1_end - 1)
+                lambda_t = lambda_start + (lambda_overlap - lambda_start) * frac
+            elif epoch < phase2_end:
+                lambda_t = lambda_overlap
+            else:
 
-        with torch.no_grad():
-            cell_positions.clamp_(-half_canvas, half_canvas)
+                lambda_t = lambda_overlap * 0.05
 
-        loss_history["total_loss"].append(total_loss.item())
-        loss_history["wirelength_loss"].append(wl_loss.item())
-        loss_history["overlap_loss"].append(overlap_loss.item())
+            total_frac = epoch / max(1, effective_epochs - 1)
+            gamma = max(0.01, 1.0 - 0.99 * total_frac)
 
-        if verbose and (epoch % log_interval == 0 or epoch == effective_epochs - 1):
-            print(f"Epoch {epoch}/{effective_epochs} "
-                  f"(lambda={lambda_t:.2f}, gamma={gamma:.3f}):")
-            print(f"  Total Loss: {total_loss.item():.6f}")
-            print(f"  Wirelength Loss: {wl_loss.item():.6f}")
-            print(f"  Overlap Loss: {overlap_loss.item():.6f}")
+            cell_features_current = cell_features.clone()
+            cell_features_current[:, 2:4] = cell_positions
 
-    # Pure WL cooldown: 200 epochs with no density penalty so cells can tighten
-    # around their nets.  A fresh optimizer avoids accumulated momentum from the
-    # main loop.  lr*0.02 is small enough to avoid displacing already-spread cells.
-    cooldown_lr = lr * 0.02
-    cooldown_optimizer = optim.SGD(
-        [cell_positions], lr=cooldown_lr, momentum=0.9, nesterov=True
-    )
-    for _cd in range(200):
-        cooldown_optimizer.zero_grad()
-        cell_features_current = cell_features.clone()
-        cell_features_current[:, 2:4] = cell_positions
-        wl_loss = wirelength_attraction_loss(
-            cell_features_current, pin_features, edge_list, gamma=0.01
+            wl_loss = wirelength_attraction_loss(
+                cell_features_current, pin_features, edge_list, gamma=gamma
+            )
+            overlap_loss = overlap_repulsion_loss(
+                cell_features_current, pin_features, edge_list
+            )
+
+            total_loss = lambda_wirelength * wl_loss + lambda_t * overlap_loss
+            total_loss.backward()
+
+            max_norm = 5.0 if epoch < phase2_end else 2.0
+            torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=max_norm)
+
+            optimizer.step()
+            scheduler.step()
+
+            with torch.no_grad():
+                cell_positions.clamp_(-half_canvas, half_canvas)
+
+            loss_history["total_loss"].append(total_loss.item())
+            loss_history["wirelength_loss"].append(wl_loss.item())
+            loss_history["overlap_loss"].append(overlap_loss.item())
+
+            if verbose and (epoch % log_interval == 0 or epoch == effective_epochs - 1):
+                print(f"[restart {restart_idx}] Epoch {epoch}/{effective_epochs} "
+                      f"(lambda={lambda_t:.2f}, gamma={gamma:.3f}):")
+                print(f"  Total Loss: {total_loss.item():.6f}")
+                print(f"  Wirelength Loss: {wl_loss.item():.6f}")
+                print(f"  Overlap Loss: {overlap_loss.item():.6f}")
+
+        if verbose:
+            print(f"\n[restart {restart_idx}] Pre-legalization WL refinement "
+                  f"({wl_refine_epochs} epochs)...")
+        wl_pos = cell_positions.clone().detach().requires_grad_(True)
+        wl_opt = optim.SGD([wl_pos], lr=0.08, momentum=0.0)
+        wl_sched = optim.lr_scheduler.CosineAnnealingLR(
+            wl_opt, T_max=wl_refine_epochs, eta_min=0.002
         )
-        wl_loss.backward()
-        torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=0.3)
-        cooldown_optimizer.step()
-        with torch.no_grad():
-            cell_positions.clamp_(-half_canvas, half_canvas)
+        for _ in range(wl_refine_epochs):
+            wl_opt.zero_grad()
+            cf_wl = cell_features.clone()
+            cf_wl[:, 2:4] = wl_pos
+            loss_wl = wirelength_attraction_loss(cf_wl, pin_features, edge_list, gamma=0.01)
+            loss_wl.backward()
 
-    # Build final features from optimized positions
-    final_cell_features = cell_features.clone()
-    final_cell_features[:, 2:4] = cell_positions.detach()
+            with torch.no_grad():
+                cell_grad = wl_pos.grad          # [N, 2]
+                cell_norms = cell_grad.norm(dim=1, keepdim=True).clamp(min=1e-8)
+                scale = (0.15 / cell_norms).clamp(max=1.0)
+                wl_pos.grad = cell_grad * scale
+            wl_opt.step()
+            wl_sched.step()
+            with torch.no_grad():
+                wl_pos.clamp_(-half_canvas, half_canvas)
 
-    # Legalization: deterministic O(N log N) sweep to guarantee zero overlap
-    if verbose:
-        print("\nRunning post-optimization legalization...")
-    final_cell_features = legalize_placement(final_cell_features)
+        final_cell_features = cell_features.clone()
+        final_cell_features[:, 2:4] = wl_pos.detach()
 
-    return {
-        "final_cell_features": final_cell_features,
-        "initial_cell_features": initial_cell_features,
-        "loss_history": loss_history,
-    }
+        if verbose:
+            print(f"[restart {restart_idx}] Legalization...")
+        final_cell_features = legalize_placement(final_cell_features)
+
+        if verbose:
+            print(f"[restart {restart_idx}] Local swap...")
+        final_cell_features = local_swap_optimization(
+            final_cell_features, pin_features, edge_list
+        )
+
+        if verbose:
+            print(f"[restart {restart_idx}] Final legalization pass...")
+        final_cell_features = legalize_placement(final_cell_features)
+
+        restart_metrics = calculate_normalized_metrics(
+            final_cell_features, pin_features, edge_list
+        )
+        restart_wl = restart_metrics["normalized_wl"]
+        restart_overlap = restart_metrics["overlap_ratio"]
+        if verbose:
+            print(f"[restart {restart_idx}] WL={restart_wl:.4f}  overlap={restart_overlap:.4f}")
+
+        if restart_overlap == 0.0 and restart_wl < best_wl:
+            best_wl = restart_wl
+            best_result = {
+                "final_cell_features": final_cell_features,
+                "initial_cell_features": initial_cell_features,
+                "loss_history": loss_history,
+            }
+
+    if best_result is None:
+        best_result = {
+            "final_cell_features": final_cell_features,
+            "initial_cell_features": initial_cell_features,
+            "loss_history": loss_history,
+        }
+
+    return best_result
 
 
 # ======= FINAL EVALUATION CODE (Don't edit this part) =======

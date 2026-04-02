@@ -42,11 +42,11 @@ We will review submissions on a rolling basis.
 | 9    | Gabriel Del Monte  | 0.0000      | 0.3427          | 606.07      |                                                              |
 | 10    | Aleksey  Valouev| 0.0000      | 0.3577          | 118.98      |                      |        
 | 11   | Mohul Shukla    | 0.0000      | 0.5048          | 54.60s      |                      |
-| 12    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
-| 13    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
-| 14   | Nawel Asgar    | 0.0000     | 0.5675          | 81.49      | Adaptive penalty scaling with cubic gradients and design-size optimization
-| 15   | Shiva Baghel     | 0.0000     | 0.5885          | 491.00      | Stable zero-overlap with balanced optimization      |
-| 16   | Rahul Nadkarni | 0.0000     | 0.7590         |    42.19    | DREAMPlace bin-density penalty (G×G grid,min(128, sqrt(N)*1.5)) replaces O(N²) pairwise loss3-phase lambda schedule: ramp → hold → small floor; gamma anneals 1.0→0.01 for sharper HPWL 200-epoch pure-WL SGD cooldown after main loop O(N log N) bisect legalizer (3 sweeps, live positions) guarantees zero overlap | 
+| 12   | Rahul Nadkarni  | 0.0000  | 0.5166  | 166  | DREAMPlace bin-density penalty, Pre-legalization pure-WL SGD refinement, Multi-start best-WL selection |
+| 13    | Ryan Hulke      | 0.0000      | 0.5226          | 166.24      |                      |
+| 14    | Neel  Shah      | 0.0000      | 0.5445          | 45.40       |  Zero overlaps on all tests, adaptive schedule + early stop |
+| 15   | Nawel Asgar    | 0.0000     | 0.5675          | 81.49      | Adaptive penalty scaling with cubic gradients and design-size optimization
+| 16   | Shiva Baghel     | 0.0000     | 0.5885          | 491.00      | Stable zero-overlap with balanced optimization      |
 | 17   | Vansh Jain      | 0.0000      | 0.9352          | 86.36       |                      |
 | 18    | Akash Pai       | 0.0006      | 0.4933          | 326.25s     |                      |
 | 19    | Zade Mahayni     | 0.00665     | 0.5157          |  127.4     | Will try again tomorrow |
