@@ -21,7 +21,6 @@ Each stage is described below.
 ─────────────────────────────────────────────────────────────────────────────
 STAGE 1 — GRADIENT-BASED GLOBAL PLACEMENT
 ─────────────────────────────────────────────────────────────────────────────
-Why gradient descent instead of simulated annealing or force-directed methods?
   • Modern nets have thousands of cells; SA scales poorly and force-directed
     methods converge to local minima with poor WL.
   • A differentiable objective lets us leverage optimised GPU/BLAS kernels
@@ -85,7 +84,6 @@ Using torch.softmax (numerically stable) this is simply:
 
     WA_x = (x ⊙ softmax(x/γ)).sum() − (x ⊙ softmax(−x/γ)).sum()
 
-Why WA instead of a squared-distance or L1 spring model?
   • Squared-distance over-penalises distant pins, causing nets to converge to
     their centroid rather than to a compact bounding box.
   • WA exactly recovers HPWL in the limit γ→0 and gives smooth gradients for
@@ -109,7 +107,6 @@ uniform-spread target are penalised quadratically:
 
     L_density = Σ_{m,n}  relu(density[m,n] − target)²  /  G²
 
-Why this formulation?
   • Memory: O(N·G + G²) via BLAS sgemm — no [N×N] or [N×G×G] tensor ever exists.
   • Long-range gradients: even before cells physically touch, an over-dense bin
     generates a non-zero gradient that pushes cells toward emptier regions.
@@ -140,7 +137,6 @@ Global placement produces "float" positions that may still have tiny residual
 overlaps. Legalization snaps cells to legal positions while minimising
 displacement from the optimised locations (so WL is preserved).
 
-WHY ABACUS for standard cells?
   The Abacus algorithm (Spindler et al., DATE 2008) packs cells within each
   row by iteratively merging overlapping clusters and repositioning each
   cluster to minimise the sum of squared displacements to cells' optimal
@@ -151,7 +147,6 @@ WHY ABACUS for standard cells?
   Standard cells are assigned to rows by rounding their y-coordinate to the
   nearest row pitch (height = 1.0), then Abacus runs per row.
 
-WHY bidirectional radial search for macros?
   Macros are large and cannot be row-snapped. Placed largest-first (so small
   macros fit in gaps left by large ones), each macro searches in 8 radial
   directions for the nearest open position rather than always pushing right.
@@ -395,7 +390,6 @@ def generate_placement_input(num_macros, num_std_cells):
 def wirelength_attraction_loss(cell_features, pin_features, edge_list, gamma=1.0):
     """Differentiable HPWL proxy using the WA (Weighted-Average) wirelength model.
 
-    WHY WA INSTEAD OF TRUE HPWL?
     True HPWL = max(x) − min(x) + max(y) − min(y) has zero gradient at all
     non-bounding pins and is non-differentiable when two pins tie for the bound.
     The WA model replaces max/min with log-sum-exp (equivalently, softmax):
@@ -407,7 +401,6 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list, gamma=1.0
     This is smooth everywhere, gives non-zero gradients to all pins (not just
     the bounding ones), and converges to true HPWL as gamma → 0.
 
-    WHY ANNEAL GAMMA?
     Large gamma early in training: smoother loss, longer-range gradients that
     pull every pin toward the cluster centroid — useful when cells are still
     scattered across the canvas. Small gamma later: loss closely matches true
@@ -471,7 +464,6 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list, gamma=1.0
 def overlap_repulsion_loss(cell_features, pin_features, edge_list, grid_size=None):
     """Differentiable cell-spreading penalty using the ePlace/DREAMPlace bin-density model.
 
-    WHY BIN-DENSITY INSTEAD OF PAIRWISE REPULSION?
     A naïve pairwise overlap penalty requires computing an [N × N] distance matrix
     (O(N²) memory and FLOPs). For N = 2 000 cells that is 4 M entries; for N = 50 K
     it is 2.5 B entries — unusable on a laptop. More importantly, a pairwise
@@ -496,7 +488,6 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, grid_size=Non
       • Density sum exactly conserves cell area (rectangle kernel, not Gaussian).
       • Quadratic overflow matches the RePlAce / DREAMPlace gradient formulation.
 
-    WHY A RECTANGULAR OVERLAP KERNEL (not a Gaussian / cosine bell)?
     Gaussian bells can assign px > 1 to bins that are completely inside a large
     macro (area of macro >> bin area). That makes the density loss permanently
     large regardless of placement quality. The rectangular kernel clips each
@@ -504,7 +495,6 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, grid_size=Non
     gets exactly 1.0 — unavoidable but constant-gradient, so it does not corrupt
     the WL signal after cells have spread.
 
-    WHY 1.35× CANVAS SLACK?
     The canvas is sized so cells occupy ~74% of the area (1/1.35). This keeps the
     target density below 1.0 everywhere, giving the WL gradient room to pull
     connected cells together without immediately retriggering the density penalty.
@@ -611,7 +601,6 @@ def legalize_placement(cell_features):
     minimising total displacement from the gradient-optimised locations, thereby
     preserving as much of the WL gain as possible.
 
-    WHY ABACUS FOR STANDARD CELLS?
     Simple "push-right" sweeps resolve overlaps by displacing every cell to the
     right of the first collision, accumulating large x-shifts for all subsequent
     cells in the row. Abacus (Spindler et al., DATE 2008) instead maintains
@@ -620,7 +609,6 @@ def legalize_placement(cell_features):
     non-overlap. This is strictly less WL-disruptive than push-right for any
     row that has more than one overlap.
 
-    WHY LARGEST-FIRST + BIDIRECTIONAL RADIAL SEARCH FOR MACROS?
     Macros are too tall to row-snap and too large to fit in typical inter-cell
     gaps. Placing them largest-first ensures big macros claim space before small
     ones arrive and fill it in. The bidirectional radial search (8 directions,
@@ -808,7 +796,7 @@ def legalize_placement(cell_features):
 def local_swap_optimization(cell_features, pin_features, edge_list, num_passes=3, k=8):
     """Post-legalization WL recovery via safe pairwise cell swaps.
 
-    WHY A SWAP PASS AFTER LEGALIZATION?
+    SWAP PASS AFTER LEGALIZATION
     Legalization (Abacus row packing + radial macro placement) shifts cells away
     from their gradient-optimised positions to satisfy non-overlap constraints.
     These displacements can move cells further from their connected nets, undoing
@@ -818,7 +806,7 @@ def local_swap_optimization(cell_features, pin_features, edge_list, num_passes=3
     cells that are in each other's "wrong" positions may simultaneously reduce
     HPWL for both of their net sets.
 
-    WHY KD-TREE NEAREST-NEIGHBOUR QUERIES?
+    KD-TREE NEAREST-NEIGHBOUR QUERIES
     Trying all O(N²) pairs per pass is too slow for large designs. A KD-tree
     restricts the search to the k spatially closest cells — the only candidates
     likely to share nets or to be meaningful swap partners given the locality of
