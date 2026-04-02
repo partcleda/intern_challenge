@@ -61,6 +61,13 @@ from analytics import (
     print_adjacency_matrix_and_stats,
 )
 
+if torch.cuda.is_available():
+    DEVICE = torch.device("cuda")
+elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    DEVICE = torch.device("mps")
+else:
+    DEVICE = torch.device("cpu")
+
 
 # Feature index enums for cleaner code access
 class CellFeatureIdx(IntEnum):
@@ -99,6 +106,9 @@ MAX_STANDARD_CELL_PINS = 6
 
 # Output directory
 OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__)) + "/plots"
+
+if not os.path.exists(OUTPUT_DIR):
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # ======= SETUP =======
 
@@ -259,6 +269,10 @@ def generate_placement_input(num_macros, num_std_cells):
     print(f"  Total edges: {len(edge_list)}")
     print(f"  Average edges per pin: {2 * len(edge_list) / total_pins:.2f}")
 
+    cell_features = cell_features.to(DEVICE)
+    pin_features = pin_features.to(DEVICE)
+    edge_list = edge_list.to(DEVICE)
+
     return cell_features, pin_features, edge_list
 
 # ======= OPTIMIZATION CODE (edit this part) =======
@@ -280,7 +294,7 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list, use_smoot
         Scalar loss value
     """
     if edge_list.shape[0] == 0:
-        return torch.tensor(0.0, requires_grad=True)
+        return torch.tensor(0.0, device=cell_features.device, requires_grad=True)
 
     # Update absolute pin positions based on cell positions
     cell_positions = cell_features[:, 2:4]  # [N, 2]
@@ -289,12 +303,12 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list, use_smoot
     # Calculate absolute pin positions
 
     # BUG FIX: THE PREVIOUS IMPLEMENTATION USED X, Y AS CENTER OF THE CELL IN MOST PLACES BUT CORNER HERE. THIS FIXES HERE.
-    pin_absolute_x = cell_positions[cell_indices, 0] - cell_features[cell_indices, 4] / 2 + pin_features[:, 1]
-    pin_absolute_y = cell_positions[cell_indices, 1] - cell_features[cell_indices, 5] / 2 + pin_features[:, 2]
+    # pin_absolute_x = cell_positions[cell_indices, 0] - cell_features[cell_indices, 4] / 2 + pin_features[:, 1]
+    # pin_absolute_y = cell_positions[cell_indices, 1] - cell_features[cell_indices, 5] / 2 + pin_features[:, 2]
 
     # FORMER IMPLEMENTATION:
-    # pin_absolute_x = cell_positions[cell_indices, 0] + pin_features[:, 1]
-    # pin_absolute_y = cell_positions[cell_indices, 1] + pin_features[:, 2]
+    pin_absolute_x = cell_positions[cell_indices, 0] + pin_features[:, 1]
+    pin_absolute_y = cell_positions[cell_indices, 1] + pin_features[:, 2]
 
     # Get source and target pin positions for each edge
     src_pins = edge_list[:, 0].long()
@@ -424,7 +438,7 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
 
     # Ignore pairwise contributions below eps so float noise does not yield nonzero
     # loss when rectangles are separated (true overlap area is exactly zero).
-    pair_eps = 1e-12
+    pair_eps = 1e-16
     has_ov = overlap_area_pairs > pair_eps
     zero = torch.zeros_like(overlap_area_pairs)
     overlap_area_pairs = torch.where(has_ov, overlap_area_pairs, zero)
@@ -437,6 +451,75 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     loss_area = overlap_area_pairs.sum() / N
     loss_area_quadratic = torch.sum(overlap_area_pairs ** 2) / (N * N)
     loss_depth = overlap_depth_sq_pairs.sum() / N
+    return loss_area + 0.2 * loss_area_quadratic + 0.5 * loss_depth
+
+
+def overlap_repulsion_loss_fast(cell_features, pin_features, edge_list, max_neighbors=512):
+    """Same penalty as ``overlap_repulsion_loss`` but near-linear for spread-out layouts.
+
+    Sorts cells by x-coordinate and uses a sliding window: for each offset
+    k = 1..W it evaluates all (i, i+k) pairs as a single vectorized batch.
+    Because the array is x-sorted, once the minimum x-gap at an offset exceeds
+    the largest possible overlap width the loop terminates early.
+
+    Complexity: O(N * W) where W is the effective window depth (number of
+    x-neighbours within overlap range).  For well-spread placements W << N,
+    giving near-linear runtime.  Worst case (all cells at the same x) degrades
+    to O(N * max_neighbors) which is still bounded.
+
+    Args:
+        cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
+        pin_features: not used
+        edge_list: not used
+        max_neighbors: cap on sliding-window depth to bound worst case.
+
+    Returns:
+        Scalar loss value compatible with ``overlap_repulsion_loss``.
+    """
+    N = cell_features.shape[0]
+    if N <= 1:
+        return cell_features[:, 2:4].sum() * 0.0
+
+    positions = cell_features[:, 2:4]
+    half_w = cell_features[:, 4] * 0.5
+    half_h = cell_features[:, 5] * 0.5
+
+    sort_idx = torch.argsort(positions[:, 0].detach())
+    sx = positions[sort_idx, 0]
+    sy = positions[sort_idx, 1]
+    shw = half_w[sort_idx]
+    shh = half_h[sort_idx]
+
+    max_sep = (half_w.max() + half_w.max()).detach()
+
+    sum_area = positions.new_tensor(0.0)
+    sum_area_sq = positions.new_tensor(0.0)
+    sum_depth_sq = positions.new_tensor(0.0)
+    pair_eps = 1e-12
+    W = min(max_neighbors, N - 1)
+
+    for offset in range(1, W + 1):
+        n_p = N - offset
+        dx = sx[offset:] - sx[:n_p]
+        if dx.min() > max_sep:
+            break
+        dy = torch.abs(sy[offset:] - sy[:n_p])
+        sep_x = shw[offset:] + shw[:n_p]
+        sep_y = shh[offset:] + shh[:n_p]
+        ov_x = torch.relu(sep_x - dx)
+        ov_y = torch.relu(sep_y - dy)
+        area = ov_x * ov_y
+        depth_sq = ov_x ** 2 + ov_y ** 2
+        valid = area > pair_eps
+        area = area * valid
+        depth_sq = depth_sq * valid
+        sum_area = sum_area + area.sum()
+        sum_area_sq = sum_area_sq + (area ** 2).sum()
+        sum_depth_sq = sum_depth_sq + depth_sq.sum()
+
+    loss_area = sum_area / N
+    loss_area_quadratic = sum_area_sq / (N * N)
+    loss_depth = sum_depth_sq / N
     return loss_area + 0.2 * loss_area_quadratic + 0.5 * loss_depth
 
 
@@ -497,22 +580,19 @@ def density_overflow_loss(
     ix = torch.floor(tx).long()
     iy = torch.floor(ty).long()
 
-    offsets = [(di, dj) for di in range(-R, R + 1) for dj in range(-R, R + 1)]
-    K = len(offsets)
-    w_acc = torch.zeros(N, K, device=device, dtype=dtype)
-    bx_all = torch.zeros(N, K, dtype=torch.long, device=device)
-    by_all = torch.zeros(N, K, dtype=torch.long, device=device)
+    rng = torch.arange(-R, R + 1, device=device)
+    di_offsets, dj_offsets = torch.meshgrid(rng, rng, indexing="ij")
+    di_flat = di_offsets.reshape(-1)  # [K]
+    dj_flat = dj_offsets.reshape(-1)  # [K]
+
+    bx_all = ix.unsqueeze(1) + di_flat.unsqueeze(0)  # [N, K]
+    by_all = iy.unsqueeze(1) + dj_flat.unsqueeze(0)  # [N, K]
+    cx = bx_all.to(dtype) + 0.5
+    cy = by_all.to(dtype) + 0.5
     denom = float(R + 1)
-    for k, (di, dj) in enumerate(offsets):
-        bx = ix + di
-        by = iy + dj
-        cx = bx.to(dtype) + 0.5
-        cy = by.to(dtype) + 0.5
-        wx = torch.relu(1.0 - (tx - cx).abs() / denom)
-        wy = torch.relu(1.0 - (ty - cy).abs() / denom)
-        w_acc[:, k] = wx * wy
-        bx_all[:, k] = bx
-        by_all[:, k] = by
+    wx = torch.relu(1.0 - (tx.unsqueeze(1) - cx).abs() / denom)
+    wy = torch.relu(1.0 - (ty.unsqueeze(1) - cy).abs() / denom)
+    w_acc = wx * wy
 
     valid = (bx_all >= 0) & (bx_all < nx) & (by_all >= 0) & (by_all < ny)
     w_acc = w_acc * valid.to(dtype)
@@ -661,11 +741,15 @@ def train_placement(
     lambda_wl_in_wl_phase=1.0,
     lambda_ov_in_wl_phase=0.0,
     lambda_wl_in_ov_phase=1.0,
-    lambda_ov_in_ov_phase=8.0,
+    lambda_ov_in_ov_phase=5.0,
     lambda_ov_with_density=50.0,
     overlap_focus_loss_threshold=1e-12,
     overlap_dominant_head_fraction=0.0,
-    overlap_dominant_tail_fraction=0.4,
+    overlap_dominant_tail_fraction=0.5,
+    use_efficient_overlap_loss=True,
+    phase_transition_lr_boost=2.0,
+    final_lr_boost=1.0,
+    final_lr_boost_epochs=0,
     greedy_swap_enabled=True,
     greedy_swap_after_init=True,
     greedy_swap_trigger_threshold=10.0,
@@ -687,7 +771,7 @@ def train_placement(
     betas=(0.9, 0.999),
     weight_decay=1e-5,
     norm_max=100.0,
-    initial_placement="cluster",
+    initial_placement="replace_lite_noisy",
     eplace_lite_iters=100,
     eplace_lite_step=0.2,
     replace_lite_margin=1.2,
@@ -949,6 +1033,7 @@ def train_placement(
     if use_density_loss:
         loss_history["density_loss"] = []
 
+    # Sanity check inputs.
     odhf = float(overlap_dominant_head_fraction)
     odtf = float(overlap_dominant_tail_fraction)
     kick_until_fraction = float(position_noise_kick_until_fraction)
@@ -976,7 +1061,21 @@ def train_placement(
     overlap_dominant_start_epoch = int((1.0 - odtf) * num_epochs)
     kick_until_epoch = int(kick_until_fraction * num_epochs)
 
-    best_score = None  # (num_cells_with_overlaps, wirelength), lexicographic min
+    # Increase OV phase loss as N increases.
+    N = cell_features.shape[0]
+    lambda_ov_in_ov_phase_ = float(lambda_ov_in_ov_phase)
+    print(f'Example contains {N} cells.')
+    if N > 50:
+      lambda_ov_in_ov_phase_ = float(lambda_ov_in_ov_phase) * float(N) / 10.0
+    if N > 2000:
+      # Use final boost for large inputs where overlap is harder.
+      final_lr_boost = float(final_lr_boost) * float(N)
+      # Also add head OV period.
+      lambda_ov_in_ov_phase_ = float(lambda_ov_in_ov_phase) * float(N) * 25.0
+      overlap_dominant_head_fraction += 0.1
+      lambda_ov_in_wl_phase += 0.1
+
+    best_score = None  # (overlap_loss, wirelength), lexicographic min
     best_cell_positions = None
     best_epoch = None
 
@@ -988,25 +1087,37 @@ def train_placement(
             or epoch == overlap_dominant_start_epoch
         ):
             torch_optimizer.state.clear()
-
-        if warm_w > 0 and epoch < warm_w:
-            wscale = (epoch + 1) / warm_w
-            for g in torch_optimizer.param_groups:
-                g["lr"] = lr_float * wscale
+            boost = float(phase_transition_lr_boost)
+            if boost > 1.0:
+                for g in torch_optimizer.param_groups:
+                    g["lr"] = min(g["lr"] * boost, lr_float)
 
         torch_optimizer.zero_grad()
 
-        # Create cell_features with current positions
-        cell_features_current = cell_features.clone()
-        cell_features_current[:, 2:4] = cell_positions
+        # Functional construction — no clone, no in-place op, clean autograd graph.
+        cell_features_current = torch.cat(
+            [cell_features[:, :2], cell_positions, cell_features[:, 4:]], dim=1
+        )
 
         # Calculate losses
         wl_loss = wirelength_attraction_loss(
             cell_features_current, pin_features, edge_list, use_smooth_manhattan=False
         )
-        overlap_loss = overlap_repulsion_loss(
-            cell_features_current, pin_features, edge_list
-        )
+        if use_efficient_overlap_loss and N > 1024*8:
+            overlap_loss = overlap_repulsion_loss_fast(
+                cell_features_current, pin_features, edge_list
+            )
+        else:
+            overlap_loss = overlap_repulsion_loss(
+                cell_features_current, pin_features, edge_list
+            )
+
+        if overlap_loss.item() > overlap_focus_loss_threshold:
+            final_boost = float(final_lr_boost)
+            final_boost_n = int(final_lr_boost_epochs)
+            if final_boost > 1.0 and final_boost_n > 0 and epoch >= num_epochs - final_boost_n:
+                lambda_ov_in_ov_phase_ = float(lambda_ov_in_ov_phase) * final_boost
+
         if use_density_loss:
             prog = float(epoch) / float(max(num_epochs - 1, 1))
             ramp = prog ** float(lambda_density_ramp_power)
@@ -1031,12 +1142,12 @@ def train_placement(
                 epoch < overlap_dominant_head_end_epoch
                 or epoch >= overlap_dominant_start_epoch
             )
-            # overlap_dominant = overlap_dominant_window and float(
-            #     overlap_loss.detach()
-            # ) > threshold
-            overlap_dominant = overlap_dominant_window
+            overlap_dominant = overlap_dominant_window and float(
+                overlap_loss.detach()
+            ) > threshold
+            # overlap_dominant = overlap_dominant_window
             if overlap_dominant:
-                total_loss = float(lambda_ov_in_ov_phase) * overlap_loss + float(
+                total_loss = float(lambda_ov_in_ov_phase_) * overlap_loss + float(
                     lambda_wl_in_ov_phase
                 ) * wl_loss
             else:
@@ -1047,43 +1158,26 @@ def train_placement(
         # Backward pass
         total_loss.backward()
 
-        # Allow larger updates so overlaps can separate faster.
+        # Adjustable clipping to prevent gradient explosion.
         torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=float(norm_max))
+
+        # Snapshot BEFORE the optimizer step so saved positions match the loss.
+        with torch.no_grad():
+            wl_score = wl_loss.item()
+            ov_score = overlap_loss.item()
+            # Save the best placement so far.
+            if best_score is None or (ov_score, wl_score) < best_score:
+                # n_overlap_cells = calculate_cells_with_overlaps(cell_features_scoring)
+                # if n_overlap_cells == 0:
+                best_score = (ov_score, wl_score)
+                best_cell_positions = cell_positions.detach().clone()
+                best_epoch = epoch
 
         # Update positions
         torch_optimizer.step()
         if scheduler is not None and epoch >= warm_w:
             scheduler.step()
-        if (
-            int(periodic_relayout_interval) > 0
-            and (epoch + 1) % int(periodic_relayout_interval) == 0
-            and (periodic_replace_lite or periodic_quadratic_wl)
-        ):
-            with torch.no_grad():
-                relayout_cf = cell_features.clone()
-                relayout_cf[:, 2:4] = cell_positions
-                if periodic_replace_lite:
-                    _replace_lite_initial(
-                        relayout_cf,
-                        pin_features,
-                        edge_list,
-                        margin=replace_lite_margin,
-                        row_gap=replace_lite_row_gap,
-                    )
-                if periodic_quadratic_wl:
-                    _analytic_quadratic_wl_initial(
-                        relayout_cf,
-                        pin_features,
-                        edge_list,
-                        margin=replace_lite_margin,
-                    )
-                cell_positions.copy_(relayout_cf[:, 2:4])
-            if verbose:
-                print(
-                    f"Epoch {epoch}: periodic relayout "
-                    f"(replace_lite={bool(periodic_replace_lite)}, "
-                    f"quadratic_wl={bool(periodic_quadratic_wl)})."
-                )
+
         _maybe_apply_position_noise_kick(
             cell_positions,
             epoch,
@@ -1095,65 +1189,49 @@ def train_placement(
             verbose=verbose,
         )
 
-        with torch.no_grad():
-            cell_features_scoring = cell_features.clone()
-            cell_features_scoring[:, 2:4] = cell_positions
-            wl_score = wirelength_attraction_loss(
-                cell_features_scoring, pin_features, edge_list, use_smooth_manhattan=False
-            ).item()
-            n_ov_cells = len(calculate_cells_with_overlaps(cell_features_scoring))
-            pair_key = (n_ov_cells, wl_score)
-            # Save the best placement so far.
-            if best_score is None or pair_key < best_score:
-                best_score = pair_key
-                best_cell_positions = cell_positions.detach().clone()
-                best_epoch = epoch
-
-            if (
-                epoch % 1000 == 0
-                and greedy_swap_enabled
-                and greedy_swap_trigger_threshold is not None
-                and float(greedy_swap_trigger_threshold) < wl_score
-            ):
-                n_acc = _greedy_cell_position_swaps(
-                    cell_features,
-                    cell_positions,
-                    pin_features,
-                    edge_list,
-                    max_rounds=int(greedy_swap_max_rounds),
-                    max_pairs_per_round=greedy_swap_max_pairs_per_round,
-                    generator=swap_gen,
-                    max_swap_cell_area=greedy_swap_max_cell_area,
+        if (
+            epoch % 1000 == 0
+            and greedy_swap_enabled
+            and greedy_swap_trigger_threshold is not None
+            and float(greedy_swap_trigger_threshold) < wl_score
+        ):
+            n_acc = _greedy_cell_position_swaps(
+                cell_features,
+                cell_positions,
+                pin_features,
+                edge_list,
+                max_rounds=int(greedy_swap_max_rounds),
+                max_pairs_per_round=greedy_swap_max_pairs_per_round,
+                generator=swap_gen,
+                max_swap_cell_area=greedy_swap_max_cell_area,
+            )
+            cell_features[:, 2:4] = cell_positions.detach()
+            if verbose and n_acc > 0:
+                print(
+                    f"Epoch {epoch}: greedy swaps (combined loss crossed above "
+                    f"{float(greedy_swap_trigger_threshold):g}) accepted {n_acc} swaps."
                 )
-                # Keep template x,y aligned with optimized positions (init greedy used a
-                # view into cell_features; mid-training uses a separate cell_positions tensor).
-                cell_features[:, 2:4] = cell_positions.detach()
-                if verbose and n_acc > 0:
-                    print(
-                        f"Epoch {epoch}: greedy swaps (combined loss crossed above "
-                        f"{float(greedy_swap_trigger_threshold):g}) accepted {n_acc} swaps."
-                    )
 
-            if (
-                plot_epoch_snapshots
-                and int(plot_epoch_snapshot_interval) > 0
-                and ((epoch + 1) % int(plot_epoch_snapshot_interval) == 0)
-            ):
-                snap_filename = f"{plot_epoch_snapshot_prefix}_{epoch + 1}.png"
-                plot_placement(
-                    initial_cell_features,
-                    cell_features_scoring.clone(),
-                    pin_features,
-                    edge_list,
-                    filename=snap_filename,
-                    titles=(
-                        "Initial placement",
-                        f"Placement at epoch {epoch + 1}",
-                    ),
-                )
-                if verbose:
-                    out_snap = os.path.join(OUTPUT_DIR, snap_filename)
-                    print(f"Saved epoch snapshot: {out_snap}")
+        if (
+            plot_epoch_snapshots
+            and int(plot_epoch_snapshot_interval) > 0
+            and ((epoch + 1) % int(plot_epoch_snapshot_interval) == 0)
+        ):
+            snap_filename = f"{plot_epoch_snapshot_prefix}_{epoch + 1}.png"
+            plot_placement(
+                initial_cell_features,
+                cell_features_current,
+                pin_features,
+                edge_list,
+                filename=snap_filename,
+                titles=(
+                    "Initial placement",
+                    f"Placement at epoch {epoch + 1}",
+                ),
+            )
+            if verbose:
+                out_snap = os.path.join(OUTPUT_DIR, snap_filename)
+                print(f"Saved epoch snapshot: {out_snap}")
 
         # Record losses
         loss_history["total_loss"].append(total_loss.item())
@@ -1165,9 +1243,6 @@ def train_placement(
         # Log progress
         if verbose and (epoch % log_interval == 0 or epoch == num_epochs - 1):
             current_lr = torch_optimizer.param_groups[0]["lr"]
-            normalized_wl = calculate_normalized_metrics(
-                cell_features_scoring, pin_features, edge_list
-            )["normalized_wl"]
             print(f"Epoch {epoch}/{num_epochs}:")
             print(f"  Learning Rate: {current_lr:.6f}")
             print(f"  Total Loss: {total_loss.item():.6f}")
@@ -1189,7 +1264,6 @@ def train_placement(
                     f"p={float(density_penalty_exponent):g}"
                 )
             print(f"  Overlap Loss (diag): {overlap_loss.item():.6f}")
-            print(f"  Normalized WL: {normalized_wl:.6f}")
 
     # Return best-seen placement (not necessarily last epoch)
     final_cell_features = cell_features.clone()
@@ -1202,7 +1276,7 @@ def train_placement(
         if verbose or True:
             print(
                 f"Best placement snapshot at epoch {best_epoch} "
-                f"(cells_with_overlaps={best_score[0]}, "
+                f"(overlap_loss={best_score[0]:.6f}, "
                 f"wirelength_loss={best_score[1]:.6f})"
             )
 
@@ -1287,8 +1361,9 @@ def hyperparameter_search():
 
     total_cells = cell_features.shape[0]
     spread_radius = 30.0
-    angles = torch.rand(total_cells) * 2 * 3.14159
-    radii = torch.rand(total_cells) * spread_radius
+    dev = cell_features.device
+    angles = torch.rand(total_cells, device=dev) * 2 * 3.14159
+    radii = torch.rand(total_cells, device=dev) * spread_radius
     cell_features[:, 2] = radii * torch.cos(angles)
     cell_features[:, 3] = radii * torch.sin(angles)
 
@@ -1534,10 +1609,10 @@ def calculate_overlap_metrics(cell_features):
         }
 
     # Extract cell properties
-    positions = cell_features[:, 2:4].detach().numpy()  # [N, 2]
-    widths = cell_features[:, 4].detach().numpy()  # [N]
-    heights = cell_features[:, 5].detach().numpy()  # [N]
-    areas = cell_features[:, 0].detach().numpy()  # [N]
+    positions = cell_features[:, 2:4].detach().cpu().numpy()  # [N, 2]
+    widths = cell_features[:, 4].detach().cpu().numpy()  # [N]
+    heights = cell_features[:, 5].detach().cpu().numpy()  # [N]
+    areas = cell_features[:, 0].detach().cpu().numpy()  # [N]
 
     overlap_count = 0
     total_overlap_area = 0.0
@@ -1595,9 +1670,9 @@ def calculate_cells_with_overlaps(cell_features):
         return set()
 
     # Extract cell properties
-    positions = cell_features[:, 2:4].detach().numpy()
-    widths = cell_features[:, 4].detach().numpy()
-    heights = cell_features[:, 5].detach().numpy()
+    positions = cell_features[:, 2:4].detach().cpu().numpy()
+    widths = cell_features[:, 4].detach().cpu().numpy()
+    heights = cell_features[:, 5].detach().cpu().numpy()
 
     cells_with_overlaps = set()
 
@@ -1709,9 +1784,9 @@ def plot_placement(
             (ax2, final_cell_features, right_title),
         ]:
             N = cell_features.shape[0]
-            positions = cell_features[:, 2:4].detach().numpy()
-            widths = cell_features[:, 4].detach().numpy()
-            heights = cell_features[:, 5].detach().numpy()
+            positions = cell_features[:, 2:4].detach().cpu().numpy()
+            widths = cell_features[:, 4].detach().cpu().numpy()
+            heights = cell_features[:, 5].detach().cpu().numpy()
 
             # Draw cells
             for i in range(N):
@@ -1764,6 +1839,7 @@ def main():
     print("=" * 70)
     print("VLSI CELL PLACEMENT OPTIMIZATION CHALLENGE")
     print("=" * 70)
+    print(f"\nUsing device: {DEVICE}")
     print("\nObjective: Implement overlap_repulsion_loss() to eliminate cell overlaps")
     print("while minimizing wirelength.\n")
 
@@ -1785,8 +1861,9 @@ def main():
     # Initialize positions with random spread to reduce initial overlaps
     total_cells = cell_features.shape[0]
     spread_radius = 30.0
-    angles = torch.rand(total_cells) * 2 * 3.14159
-    radii = torch.rand(total_cells) * spread_radius
+    dev = cell_features.device
+    angles = torch.rand(total_cells, device=dev) * 2 * 3.14159
+    radii = torch.rand(total_cells, device=dev) * spread_radius
 
     cell_features[:, 2] = radii * torch.cos(angles)
     cell_features[:, 3] = radii * torch.sin(angles)

@@ -1,4 +1,7 @@
-"""Cell placement initialization: random disk, eplace, replace-lite, spectral clustering, quadratic WL."""
+"""Cell placement initialization: random disk, eplace, replace-lite, spectral clustering, quadratic WL.
+
+NOTE: This file is slightly more experimental than the placement.py file.
+"""
 
 from __future__ import annotations
 
@@ -89,7 +92,11 @@ def replace_lite_initial(
                 A[j, i] += 1.0
     d = A.sum(dim=1)
     L = torch.diag(d) - A
-    _, V = torch.linalg.eigh(L)
+    if device.type == "mps":
+        _, V = torch.linalg.eigh(L.cpu())
+    else:
+        _, V = torch.linalg.eigh(L)
+    V = V.to(device)
     coord1d = V[:, 1] if n > 1 else V[:, 0]
     order = torch.argsort(coord1d)
     total_area = cell_features[:, CellFeatureIdx.AREA].sum().item()
@@ -144,7 +151,13 @@ def spectral_clustering_initial(
         apply_random_disk_initial(cell_features, random_spread_radius=None)
         return
     L = torch.diag(d) - A
-    _, V = torch.linalg.eigh(L)
+
+    if device.type == "mps":
+        _, V = torch.linalg.eigh(L.cpu())
+    else:
+        _, V = torch.linalg.eigh(L)
+    V = V.to(device)
+
     k_clusters = max(2, min(8, int(round(math.sqrt(n)))))
     emb_dim = min(max(1, k_clusters - 1), max(1, n - 1))
     X = V[:, 1 : 1 + emb_dim].clone()
@@ -322,7 +335,11 @@ def analytic_quadratic_wl_initial(
         return
     d = A.sum(dim=1)
     L = torch.diag(d) - A
-    _, V = torch.linalg.eigh(L)
+    if device.type == "mps":
+        _, V = torch.linalg.eigh(L.cpu())
+    else:
+        _, V = torch.linalg.eigh(L)
+    V = V.to(device)
     if n == 2:
         vx = V[:, 1]
         vy = torch.zeros(n, device=device, dtype=dtype)

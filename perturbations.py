@@ -135,9 +135,8 @@ def maybe_apply_position_noise_kick(
         noise = torch.randn(
             shape,
             generator=swap_gen,
-            device=cell_positions.device,
             dtype=cell_positions.dtype,
-        )
+        ).to(cell_positions.device)
     else:
         noise = torch.randn(
             shape,
