@@ -1,41 +1,187 @@
 """
-VLSI Cell Placement Optimization Challenge
-==========================================
+VLSI Cell Placement Optimization
+=================================
 
-CHALLENGE OVERVIEW:
-You are tasked with implementing a critical component of a chip placement optimizer.
-Given a set of cells (circuit components) with fixed sizes and connectivity requirements,
-you need to find positions for these cells that:
-1. Minimize total wirelength (wiring cost between connected pins)
-2. Eliminate all overlaps between cells
+PROBLEM STATEMENT
+-----------------
+Given a mixed-size netlist (large macros + tiny standard cells) with known
+pin-to-pin connectivity, find 2-D positions that:
+  1. Eliminate all cell-to-cell overlaps.
+  2. Minimize total routed wirelength (HPWL across all nets).
 
-YOUR TASK:
-Implement the `overlap_repulsion_loss()` function to prevent cells from overlapping.
-The function must:
-- Be differentiable (uses PyTorch operations for gradient descent)
-- Detect when cells overlap in 2D space
-- Apply increasing penalties for larger overlaps
-- Work efficiently with vectorized operations
+ALGORITHM OVERVIEW
+------------------
+The solver mirrors the analytical-placement flow popularised by DREAMPlace
+(Lin et al., DAC 2019 / TCAD 2021):
 
-SUCCESS CRITERIA:
-After running the optimizer with your implementation:
-- overlap_count should be 0 (no overlapping cell pairs)
-- total_overlap_area should be 0.0 (no overlap)
-- wirelength should be minimized
-- Visualization should show clean, non-overlapping placement
+  Global placement  ──►  WL refinement  ──►  Legalization  ──►  Local swap
 
-GETTING STARTED:
-1. Read through the existing code to understand the data structures
-2. Look at wirelength_attraction_loss() as a reference implementation
-3. Implement overlap_repulsion_loss() following the TODO instructions
-4. Run main() and check the overlap metrics in the output
-5. Tune hyperparameters (lambda_overlap, lambda_wirelength) if needed
-6. Generate visualization to verify your solution
+Each stage is described below.
 
-BONUS CHALLENGES:
-- Improve convergence speed by tuning learning rate or adding momentum
-- Implement better initial placement strategy
-- Add visualization of optimization progress over time
+─────────────────────────────────────────────────────────────────────────────
+STAGE 1 — GRADIENT-BASED GLOBAL PLACEMENT
+─────────────────────────────────────────────────────────────────────────────
+Why gradient descent instead of simulated annealing or force-directed methods?
+  • Modern nets have thousands of cells; SA scales poorly and force-directed
+    methods converge to local minima with poor WL.
+  • A differentiable objective lets us leverage optimised GPU/BLAS kernels
+    (PyTorch autograd) and well-studied first-order optimisers (SGD + momentum).
+
+The joint loss is:
+
+    L = λ_wl · L_WL  +  λ_overlap(t) · L_density
+
+where both terms are smooth everywhere, so gradients are meaningful at every
+iteration — not just when cells are already close.
+
+THREE-PHASE LAMBDA SCHEDULE
+  Phase 1 (0–50% of epochs):
+    λ_overlap ramps from 5% → 100% of its target value.
+    Cells are still bunched at initialisation; a gentle ramp avoids explosive
+    gradients while the density penalty pushes them apart.
+
+  Phase 2 (50–92%):
+    λ_overlap is held at its full target value; WL and density compete at equal
+    footing. Cells settle into clustered-but-spread positions.
+
+  Phase 3 (92–100%):
+    λ_overlap drops to ~5% of target. With cells already well-spread the density
+    penalty has little work to do, so we let the WL gradient dominate and pull
+    connected cells together for a cleaner final topology.
+
+GAMMA ANNEALING (WA wirelength smoothness):
+    gamma anneals 1.0 → 0.01 over all epochs. Large gamma early on means the WA
+    loss is smooth and has long-range gradients; small gamma later makes it
+    a tight approximation of true HPWL.
+
+OPTIMIZER CHOICE — Nesterov SGD + cosine LR annealing:
+  • Nesterov momentum dampens oscillations around dense clusters and provides
+    better convergence than vanilla SGD or Adam in this setting (Adam's adaptive
+    scaling can suppress the density gradient when it is much smaller than the WL
+    gradient, causing cells to re-overlap late in training).
+  • Cosine annealing decays the learning rate smoothly, avoiding the abrupt steps
+    of step-decay schedules that can destabilise the placement.
+
+MULTI-START RESTARTS (small designs only, N ≤ 300):
+  Global placement is non-convex; a single run can converge to a poor basin.
+  For small designs (fast to optimise) we run 5 restarts with different random
+  initialisations and keep whichever legal result achieves the lowest normalised
+  WL. For large designs the cost is prohibitive so we use a single run.
+
+─────────────────────────────────────────────────────────────────────────────
+STAGE 1a — WIRELENGTH MODEL: WA (Weighted-Average) HPWL
+─────────────────────────────────────────────────────────────────────────────
+True HPWL = max(x) − min(x) + max(y) − min(y) over pins in a net.
+This is non-differentiable at ties (where two pins share the bounding edge).
+
+The WA (Weighted-Average) model from DREAMPlace replaces max/min with
+soft-max/soft-min via log-sum-exp:
+
+    WA_pos_x = (Σ x·exp(x/γ)) / (Σ exp(x/γ))  ≈  max(x)   as γ→0
+    WA_neg_x = (Σ x·exp(-x/γ)) / (Σ exp(-x/γ))  ≈  min(x)  as γ→0
+    WA_x = WA_pos_x − WA_neg_x
+
+Using torch.softmax (numerically stable) this is simply:
+
+    WA_x = (x ⊙ softmax(x/γ)).sum() − (x ⊙ softmax(−x/γ)).sum()
+
+Why WA instead of a squared-distance or L1 spring model?
+  • Squared-distance over-penalises distant pins, causing nets to converge to
+    their centroid rather than to a compact bounding box.
+  • WA exactly recovers HPWL in the limit γ→0 and gives smooth gradients for
+    all γ > 0, making it the industry-standard differentiable WL proxy.
+
+─────────────────────────────────────────────────────────────────────────────
+STAGE 1b — OVERLAP MODEL: ePlace / DREAMPlace BIN-DENSITY PENALTY
+─────────────────────────────────────────────────────────────────────────────
+Naïve pairwise overlap detection is O(N²) in both memory and compute — a
+50 k-cell design would need a 2.5 billion-entry matrix.
+
+The ePlace / DREAMPlace approach (Cheng et al., TCAD 2019) partitions the
+canvas into a G×G grid of "bins" and measures the total cell area that falls
+inside each bin:
+
+    density[m, n] = Σ_i  px[i, m] · py[i, n]
+
+where px[i, m] / py[i, n] is the fractional overlap of cell i with bin column m
+/ row n (a clipped triangle/rectangle kernel).  Bins whose density exceeds the
+uniform-spread target are penalised quadratically:
+
+    L_density = Σ_{m,n}  relu(density[m,n] − target)²  /  G²
+
+Why this formulation?
+  • Memory: O(N·G + G²) via BLAS sgemm — no [N×N] or [N×G×G] tensor ever exists.
+  • Long-range gradients: even before cells physically touch, an over-dense bin
+    generates a non-zero gradient that pushes cells toward emptier regions.
+    Pairwise ReLU methods have zero gradient until cells actually overlap, giving
+    the optimiser no signal to pre-empt collisions.
+  • Physical fidelity: we use the exact rectangular-overlap fraction (clipped to
+    [0,1]) rather than a Gaussian bell, so the density sum exactly conserves cell
+    area and the target density is analytically correct.
+
+Canvas slack of 1.35× (35% free space) keeps the target density below 1.0 for
+typical macro-dominated designs, giving the WL gradient room to cluster cells
+without immediately triggering the density penalty.
+
+─────────────────────────────────────────────────────────────────────────────
+STAGE 2 — PRE-LEGALIZATION WL REFINEMENT
+─────────────────────────────────────────────────────────────────────────────
+After the three-phase global placement, cells are spread but the density
+penalty was non-zero throughout, which biases positions away from pure WL
+optima. A short WL-only SGD pass (no density term) moves cells closer to
+their connected nets. Per-cell gradient normalisation (scale = 0.15 / ||g||)
+is used instead of a single global clip so that large macros do not dominate
+and suppress the gradient signal for nearby standard cells.
+
+─────────────────────────────────────────────────────────────────────────────
+STAGE 3 — LEGALIZATION: ABACUS ROW PACKING + MACRO SPREADING
+─────────────────────────────────────────────────────────────────────────────
+Global placement produces "float" positions that may still have tiny residual
+overlaps. Legalization snaps cells to legal positions while minimising
+displacement from the optimised locations (so WL is preserved).
+
+WHY ABACUS for standard cells?
+  The Abacus algorithm (Spindler et al., DATE 2008) packs cells within each
+  row by iteratively merging overlapping clusters and repositioning each
+  cluster to minimise the sum of squared displacements to cells' optimal
+  x-positions. This is optimal for 1-D non-overlap and produces far less
+  WL degradation than simpler "push-right" sweeps, which blindly shift all
+  cells to the right of the first collision point.
+
+  Standard cells are assigned to rows by rounding their y-coordinate to the
+  nearest row pitch (height = 1.0), then Abacus runs per row.
+
+WHY bidirectional radial search for macros?
+  Macros are large and cannot be row-snapped. Placed largest-first (so small
+  macros fit in gaps left by large ones), each macro searches in 8 radial
+  directions for the nearest open position rather than always pushing right.
+  This preserves the relative x–y topology from global placement.
+
+Three x-then-y sweep passes after row packing resolve any residual
+macro–standard-cell boundary collisions.
+
+─────────────────────────────────────────────────────────────────────────────
+STAGE 4 — LOCAL SWAP OPTIMIZATION
+─────────────────────────────────────────────────────────────────────────────
+Legalization can perturb cells enough to un-do some WL gains. A pairwise
+cell-swap pass iterates over every cell, finds its k nearest neighbours via
+a KD-tree, and accepts any swap that (a) reduces total HPWL and (b) does not
+introduce new overlaps (verified by checking the neighbourhood at the two new
+positions before committing). This recovers a few percent of WL at negligible
+overlap risk.
+
+REFERENCES
+----------
+[DREAMPlace]  Lin et al., "DREAMPlace: Deep Learning Toolkit-Enabled GPU
+              Acceleration for Modern VLSI Placement," DAC 2019 / TCAD 2021.
+[ePlace]      Lu et al., "ePlace: Electrostatics-Based Placement Using Fast
+              Fourier Transform and Nesterov's Method," TODAES 2015.
+[RePlAce]     Cheng et al., "RePlAce: Advancing Solution Quality and
+              Routability Validation in Global Placement," TCAD 2019.
+[Abacus]      Spindler et al., "Abacus: Fast Legalization of Standard Cell
+              Circuits with Minimal Movement," DATE 2008.
+[NTUplace3]   Chen et al., "NTUplace3: An Analytical Placer for Large-Scale
+              Mixed-Size Designs," TCAD 2008.
 """
 
 import os
@@ -247,22 +393,37 @@ def generate_placement_input(num_macros, num_std_cells):
 # ======= OPTIMIZATION CODE (edit this part) =======
 
 def wirelength_attraction_loss(cell_features, pin_features, edge_list, gamma=1.0):
-    """Calculate loss based on total wirelength to minimize routing.
+    """Differentiable HPWL proxy using the WA (Weighted-Average) wirelength model.
 
-    This is a REFERENCE IMPLEMENTATION showing how to write a differentiable loss function.
+    WHY WA INSTEAD OF TRUE HPWL?
+    True HPWL = max(x) − min(x) + max(y) − min(y) has zero gradient at all
+    non-bounding pins and is non-differentiable when two pins tie for the bound.
+    The WA model replaces max/min with log-sum-exp (equivalently, softmax):
 
-    The loss computes the Manhattan distance between connected pins and minimizes
-    the total wirelength across all edges.
+        WA_pos_x = softmax( x/γ) · x  ≈  max(x)  as  γ → 0
+        WA_neg_x = softmax(-x/γ) · x  ≈  min(x)  as  γ → 0
+        WA_x     = WA_pos_x − WA_neg_x
+
+    This is smooth everywhere, gives non-zero gradients to all pins (not just
+    the bounding ones), and converges to true HPWL as gamma → 0.
+
+    WHY ANNEAL GAMMA?
+    Large gamma early in training: smoother loss, longer-range gradients that
+    pull every pin toward the cluster centroid — useful when cells are still
+    scattered across the canvas. Small gamma later: loss closely matches true
+    HPWL so the optimiser tightens the bounding box rather than just centering
+    the mass.  gamma is annealed 1.0 → 0.01 over the full training run by the
+    caller (train_placement).
 
     Args:
         cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
         pin_features: [P, 7] tensor with pin information
         edge_list: [E, 2] tensor with edges
-        gamma: WA smoothing — larger is smoother; anneal from 1.0→0.1 during
-               training so the final loss closely approximates true HPWL
+        gamma: WA smoothing temperature; anneal from 1.0 → 0.01 during training
+               so the final loss closely approximates true HPWL
 
     Returns:
-        Scalar loss value
+        Scalar loss: mean per-edge WA wirelength
     """
     if edge_list.shape[0] == 0:
         return torch.tensor(0.0, requires_grad=True)
@@ -308,26 +469,54 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list, gamma=1.0
 
 
 def overlap_repulsion_loss(cell_features, pin_features, edge_list, grid_size=None):
-    """Calculate loss to prevent cell overlaps via ePlace/DREAMPlace bin-density penalty.
+    """Differentiable cell-spreading penalty using the ePlace/DREAMPlace bin-density model.
 
-    Instead of an O(N²) pairwise matrix, the canvas is divided into a G×G grid of
-    bins. Each cell contributes to nearby bins via a differentiable triangle kernel
-    (the NTUplace3 / DREAMPlace density model). Bins whose density exceeds the
-    uniform target are penalised quadratically — this drives cells to spread
-    uniformly and eliminates overlaps without ever building an [N,N] tensor.
+    WHY BIN-DENSITY INSTEAD OF PAIRWISE REPULSION?
+    A naïve pairwise overlap penalty requires computing an [N × N] distance matrix
+    (O(N²) memory and FLOPs). For N = 2 000 cells that is 4 M entries; for N = 50 K
+    it is 2.5 B entries — unusable on a laptop. More importantly, a pairwise
+    ReLU penalty has zero gradient until cells physically touch, so the optimiser
+    receives no signal to pre-empt collisions.
 
-    Memory: O(N·G + G²) via BLAS sgemm — handles N=100K+ on a laptop.
-    Gradients exist everywhere (nonzero even before cells touch), giving the
-    optimiser a long-range spreading signal that pairwise ReLU lacks.
+    The bin-density approach (ePlace, Lu et al. 2015; DREAMPlace, Lin et al. 2019)
+    instead tiles the canvas with a G×G grid and measures how much of each bin is
+    covered by cells:
+
+        density[m, n] = Σ_i  px[i, m] · py[i, n]
+
+    where px[i, m] is the fractional horizontal overlap of cell i with bin column m
+    (a clipped rectangle kernel, ∈ [0, 1]).  Bins that exceed the uniform-spread
+    target are penalised quadratically:
+
+        L = Σ_{m,n}  relu(density[m,n] − target)²  /  G²
+
+    Key advantages over pairwise repulsion:
+      • O(N·G + G²) via BLAS sgemm — no [N×N] tensor ever constructed.
+      • Non-zero gradients *before* cells touch → long-range spreading signal.
+      • Density sum exactly conserves cell area (rectangle kernel, not Gaussian).
+      • Quadratic overflow matches the RePlAce / DREAMPlace gradient formulation.
+
+    WHY A RECTANGULAR OVERLAP KERNEL (not a Gaussian / cosine bell)?
+    Gaussian bells can assign px > 1 to bins that are completely inside a large
+    macro (area of macro >> bin area). That makes the density loss permanently
+    large regardless of placement quality. The rectangular kernel clips each
+    contribution to [0, 1], so an interior bin of a macro that fully covers it
+    gets exactly 1.0 — unavoidable but constant-gradient, so it does not corrupt
+    the WL signal after cells have spread.
+
+    WHY 1.35× CANVAS SLACK?
+    The canvas is sized so cells occupy ~74% of the area (1/1.35). This keeps the
+    target density below 1.0 everywhere, giving the WL gradient room to pull
+    connected cells together without immediately retriggering the density penalty.
 
     Args:
         cell_features: [N, 6] tensor with [area, num_pins, x, y, width, height]
         pin_features: [P, 7] tensor with pin information (not used here)
         edge_list: [E, 2] tensor with edges (not used here)
-        grid_size: G for the G×G bin grid; None → auto-scaled with N
+        grid_size: G for the G×G bin grid; None → auto-scaled with sqrt(N)
 
     Returns:
-        Scalar loss value (near zero when density is everywhere ≤ target)
+        Scalar loss (near zero when every bin's density ≤ uniform target)
     """
     N = cell_features.shape[0]
     if N <= 1:
@@ -415,25 +604,44 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list, grid_size=Non
 
 
 def legalize_placement(cell_features):
-    """Min-displacement legalization using Abacus row packing for standard cells.
+    """Min-displacement legalization: Abacus row packing (std cells) + radial macro search.
 
-    Replaces the old push-right-only sweep with a strategy that keeps cells as
-    close as possible to their gradient-optimised positions, preserving WL gains:
+    Global placement leaves cells at floating-point positions that may have tiny
+    residual overlaps. Legalization maps them to fully-legal positions while
+    minimising total displacement from the gradient-optimised locations, thereby
+    preserving as much of the WL gain as possible.
 
-    1. Macros (h > 1.5): placed largest-first with a bidirectional radial search
-       that finds the nearest valid position in any direction rather than always
-       pushing right.
-    2. Standard cells (h == 1.0): snapped to horizontal rows (pitch = 1.0) and
-       packed within each row via the Abacus cluster algorithm, which minimises
-       sum |x_placed - x_opt| subject to left-to-right non-overlap.
-    3. Three x+y sweep pairs (same as the original) resolve any residual
-       macro–std-cell boundary overlaps after the row packing.
+    WHY ABACUS FOR STANDARD CELLS?
+    Simple "push-right" sweeps resolve overlaps by displacing every cell to the
+    right of the first collision, accumulating large x-shifts for all subsequent
+    cells in the row. Abacus (Spindler et al., DATE 2008) instead maintains
+    "clusters" of adjacent cells and repositions each cluster to the median of
+    its members' optimal x-offsets — the 1-D optimal solution subject to
+    non-overlap. This is strictly less WL-disruptive than push-right for any
+    row that has more than one overlap.
+
+    WHY LARGEST-FIRST + BIDIRECTIONAL RADIAL SEARCH FOR MACROS?
+    Macros are too tall to row-snap and too large to fit in typical inter-cell
+    gaps. Placing them largest-first ensures big macros claim space before small
+    ones arrive and fill it in. The bidirectional radial search (8 directions,
+    increasing radius) finds the nearest valid open position in any direction
+    rather than always pushing right — preserving the relative x–y topology
+    from global placement and minimising macro displacement.
+
+    Three final x-then-y sweep passes clean up any macro–standard-cell boundary
+    collisions that slip through after row packing (e.g. a macro whose edge
+    slightly intersects a row).
+
+    Pipeline:
+        1. Macros (h > 1.5): largest-first radial placement.
+        2. Standard cells (h ≈ 1.0): row assignment + Abacus cluster packing.
+        3. Three x+y sweeps: residual boundary collision resolution.
 
     Args:
-        cell_features: [N, 6] tensor (modified in-place and returned)
+        cell_features: [N, 6] tensor with cell positions and sizes
 
     Returns:
-        cell_features with positions adjusted to be fully non-overlapping
+        Cloned cell_features with positions adjusted to be fully non-overlapping
     """
     import bisect
     import numpy as np
@@ -598,17 +806,35 @@ def legalize_placement(cell_features):
 
 
 def local_swap_optimization(cell_features, pin_features, edge_list, num_passes=3, k=8):
-    """Post-legalization local pairwise cell swap to reduce HPWL.
+    """Post-legalization WL recovery via safe pairwise cell swaps.
 
-    For each cell, tries swapping positions with up to k nearest neighbours.
-    A swap is accepted only if it (a) strictly reduces total HPWL and (b) does
-    not introduce any new overlaps — verified via a KD-tree neighbourhood query
-    around both new positions before committing the swap.
+    WHY A SWAP PASS AFTER LEGALIZATION?
+    Legalization (Abacus row packing + radial macro placement) shifts cells away
+    from their gradient-optimised positions to satisfy non-overlap constraints.
+    These displacements can move cells further from their connected nets, undoing
+    some of the WL improvement earned during global placement.
 
-    This step never touches the overlap count: every accepted swap is checked
-    for safety first, so the placement stays fully legal throughout.
+    A greedy pairwise swap pass can partially recover this loss: swapping two
+    cells that are in each other's "wrong" positions may simultaneously reduce
+    HPWL for both of their net sets.
 
-    Skipped for very large designs (N > 10 000) to keep runtime bounded.
+    WHY KD-TREE NEAREST-NEIGHBOUR QUERIES?
+    Trying all O(N²) pairs per pass is too slow for large designs. A KD-tree
+    restricts the search to the k spatially closest cells — the only candidates
+    likely to share nets or to be meaningful swap partners given the locality of
+    routing.
+
+    SAFETY GUARANTEE — no new overlaps:
+    Before committing a swap the two new positions are each checked against their
+    neighbourhood (≤ 30 nearest cells) for bounding-box intersection. A swap is
+    rejected if it would create any overlap, so the placement remains fully legal
+    throughout the entire pass.
+
+    Only cells of similar height (|Δh| ≤ 0.5) are swap-eligible, preventing
+    macros from swapping into row slots designed for standard cells.
+
+    Skipped entirely for N > 10 000 where the KD-tree rebuild cost per pass
+    outweighs the WL benefit.
 
     Args:
         cell_features: [N, 6] tensor with legalised cell positions
@@ -753,17 +979,55 @@ def train_placement(
     verbose=True,
     log_interval=100,
 ):
-    """Train the placement optimization using gradient descent.
+    """Run the full analytical placement flow: global opt → WL refinement → legalization → swap.
 
-    Three-phase training strategy:
-      Phase 1 (0–50%):  lambda ramps 5% → 100% of target; gamma anneals 1.0 → 0.01.
-                         Density penalty dominates early so cells spread quickly.
-      Phase 2 (50–92%): lambda held at target; gamma anneals toward 0.01.
-                         WL optimisation sharpens while density keeps cells spread.
-      Phase 3 (92–100%): lambda drops to ~5–15% of target; gamma stays at 0.01.
-                          Near-zero density penalty lets WL pull cells together
-                          without causing new overlaps (cells are already well spread).
-    After training, legalize_placement() eliminates any residual overlaps.
+    OPTIMIZER: Nesterov SGD + cosine LR annealing
+      Nesterov momentum is chosen over Adam because Adam's per-parameter
+      adaptive scaling suppresses the density gradient (which tends to be
+      small relative to WL gradients) late in training, causing cells to
+      slowly drift back into overlapping positions. Nesterov preserves the
+      relative magnitude of each loss term. Cosine annealing decays the
+      learning rate smoothly from `lr` to `lr*0.01`, avoiding the abrupt
+      plateau-then-drop behaviour of step-decay schedules.
+
+    THREE-PHASE LAMBDA SCHEDULE (see module docstring for full rationale):
+      Phase 1 (0–50%):   λ_overlap ramps 5% → 100% of target.
+                          Gentle ramp avoids explosive gradients while cells
+                          are still bunched at initialisation.
+      Phase 2 (50–92%):  λ_overlap held at full target.
+                          WL and density compete; cells settle into a spread,
+                          topologically reasonable arrangement.
+      Phase 3 (92–100%): λ_overlap drops to ~5% of target.
+                          Cells are already spread; WL gradient dominates and
+                          pulls connected clusters together cleanly.
+
+    GAMMA ANNEALING: 1.0 → 0.01 over all epochs.
+      Controls the smoothness of the WA wirelength approximation (see
+      wirelength_attraction_loss for detail). Large gamma = smooth long-range
+      gradients early; small gamma = tight HPWL approximation late.
+
+    EPOCH SCALING: effective_epochs = num_epochs × N^0.55 / N_ref^0.55
+      Larger designs need more iterations for the density wave to propagate.
+      The 0.55 exponent is empirically tuned to keep runtime sub-linear in N
+      while maintaining placement quality across the design-size range in the
+      test suite.
+
+    GRADIENT CLIPPING:
+      Clipped to max_norm=5.0 in phases 1–2 and 2.0 in phase 3, preventing
+      large macro cells (whose density contribution spans many bins) from
+      generating gradient spikes that would shoot small standard cells off
+      the canvas.
+
+    PRE-LEGALIZATION WL REFINEMENT:
+      A WL-only SGD pass (no density penalty) moves cells closer to their
+      net centroids before legalization runs. Per-cell gradient normalisation
+      (target step ≈ 0.15 units) is used so large macros do not dominate
+      and suppress the gradient signal for nearby standard cells.
+
+    MULTI-START RESTARTS (N ≤ 300 only):
+      The non-convex loss landscape has many local minima; small designs are
+      cheap enough to run 5 times with different random initialisations.
+      We keep whichever legal run achieves the lowest normalised WL.
 
     Args:
         cell_features: [N, 6] tensor with cell properties
@@ -771,16 +1035,16 @@ def train_placement(
         edge_list: [E, 2] tensor with edge connectivity
         num_epochs: Base number of iterations (scaled internally by design size)
         lr: Peak learning rate (cosine-annealed down to lr*0.01)
-        lambda_wirelength: Weight for wirelength loss
-        lambda_overlap: Target weight for overlap/density loss
-        verbose: Whether to print progress
-        log_interval: How often to print progress
+        lambda_wirelength: Weight for wirelength loss (fixed throughout)
+        lambda_overlap: Target peak weight for the bin-density loss
+        verbose: Whether to print per-epoch progress
+        log_interval: How often (in epochs) to print progress
 
     Returns:
         Dictionary with:
-            - final_cell_features: Optimized and legalized cell positions
+            - final_cell_features: Optimized, legalized, swap-refined positions
             - initial_cell_features: Original cell positions (for comparison)
-            - loss_history: Loss values over time
+            - loss_history: Per-epoch total / WL / overlap loss values
     """
     import math as _math
 
