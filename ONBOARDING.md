@@ -13,7 +13,7 @@ The library optimizes **2D positions** of rectangular **cells** (macros and stan
 
 **Convention:** Each cell is an axis-aligned rectangle **centered** at `(x, y)` with given `width` and `height`. Overlap between two cells is computed from center-to-center separation versus half-widths and half-heights (same criterion everywhere: strict separation when `|dx| == (w_i + w_j)/2` is treated as non-overlapping in the vectorized checks via `<`).
 
-Pins have positions **relative** to the cell corner in the stored features, but **wirelength loss** recomputes absolute pin coordinates as `cell_center + relative_offset` each forward pass, so moving `cell_features[:, 2:4]` is sufficient for optimization.
+In **`generate_placement_input`**, pin `PIN_X` / `PIN_Y` are sampled in **cell-local** coordinates from the cell’s **lower-left** (between margins and the cell width/height). **`wirelength_attraction_loss`** forms world coordinates as **`cell_center + (PIN_X, PIN_Y)`** (same columns each step), so only `cell_features[:, 2:4]` is optimized; be aware this mixes “center + offset” with offsets that were generated from the lower-left frame.
 
 ---
 
@@ -92,7 +92,7 @@ Only columns **2–3** receive gradients during `train_placement`; other columns
 | 5 | `WIDTH` | Pin width (e.g. 0.1). |
 | 6 | `HEIGHT` | Pin height. |
 
-**Note:** `wirelength_attraction_loss` builds absolute positions from **cell centers + columns 1–2**, not from columns 3–4.
+**Note:** `wirelength_attraction_loss` uses **cell centers + columns 1–2** (not columns 3–4, which are not kept in sync during training).
 
 ### `edge_list` — shape `[E, 2]`, `dtype` long
 
@@ -119,8 +119,8 @@ Implementation mixes vectorized tensor ops with Python loops over cells/pins for
 | | |
 |--|--|
 | **Input** | Full feature tensors and edge list. |
-| **Output** | Scalar `torch.Tensor` (mean smooth Manhattan distance per edge). |
-| **Utility** | Differentiable **wirelength proxy**: gathers pin absolutes via `cell_positions[cell_indices] + offsets`, then per-edge smooth L1 / log-sum-exp Manhattan with smoothing parameter `alpha = 0.1`. Returns **0** with `requires_grad=True` if `E == 0`. |
+| **Output** | Scalar `torch.Tensor`: mean per-edge cost (sum of edge terms divided by `E`). |
+| **Utility** | Differentiable **wirelength proxy**: absolute pins = `cell_positions[cell_indices] + pin_features[:, 1:3]`; for each edge, nonnegative `dx, dy` from `abs` differences; **`alpha * logsumexp([dx/α, dy/α])`** on the two axes (a smooth **maximum**-like blend of the separations, not `dx + dy`). `alpha = 0.1`. Returns **0** with `requires_grad=True` if `E == 0`. |
 
 **Vectorization:** Indexing `pin_absolute_*` by `src_pins` and `tgt_pins` avoids Python loops over edges.
 
@@ -162,9 +162,9 @@ Implementation mixes vectorized tensor ops with Python loops over cells/pins for
 
 | | |
 |--|--|
-| **Input** | Initial features and graph; hyperparameters: `num_epochs`, `lr`, `lambda_wirelength`, `lambda_overlap`, `overlap_loss_mode`, `verbose`, `log_interval`, optional `loss_plot_path`, `overlap_ratio_tag_interval`, `per_cell_grad_clip_norm`. |
-| **Output** | `dict` with `final_cell_features`, `initial_cell_features`, `loss_history` (lists per epoch + optional overlap ratio tags), `lambda_wirelength`, `lambda_overlap`, `num_epochs`. |
-| **Utility** | Runs **Adam** only on `cell_positions` clone. Each step: cosine LR; forward = weighted sum `λ_wl * L_wl + λ_ol * L_ol`; backward; optional **per-cell** L2 grad clip (row-wise norm, scale capped at 1); optimizer step. Writes loss plot if path given. |
+| **Input** | Initial features and graph. Defaults (overridable): `num_epochs=10000`, `lr=0.05`, `lambda_wirelength=0.1`, `lambda_overlap=50`, `overlap_loss_mode="fast"`, `verbose=True`, `log_interval=100`, optional `loss_plot_path`, `overlap_ratio_tag_interval=2000`, `per_cell_grad_clip_norm=2.44343` (or `None` to disable clipping). |
+| **Output** | `dict` with `final_cell_features`, `initial_cell_features`, `loss_history`, `lambda_wirelength`, `lambda_overlap`, `num_epochs`. |
+| **Utility** | Runs **Adam** on a detached `cell_positions` tensor (columns 2–3 only). Each epoch: **`_lr_cosine_anneal(epoch/span, lr)`** sets the optimizer LR (`span = max(num_epochs-1, 1)`). **`λ_wl` and `λ_ol` are fixed** for the whole run (`lambda_wirelength`, `lambda_overlap`). Forward: `total_loss = λ_wl * L_wl + λ_ol * L_ol`; backward; optional **per-cell** L2 grad clip; `optimizer.step()`. `loss_history` records raw/weighted losses, **constant** `scheduled_lambda_wl` / `scheduled_lambda_ol`, `learning_rate`, and optional `overlap_ratio_tags` when `overlap_ratio_tag_interval` is nonzero. Optional loss figure via `plot_training_loss_curves`. |
 
 **Training graph:** `cell_features` is cloned; each epoch builds `cell_features_current` by copying and injecting `cell_positions` into columns 2–3, so the backward path flows into `cell_positions` only.
 
@@ -266,7 +266,7 @@ Nested helper `_positive_log_y` masks non-positive/non-finite values for log axe
 
 | File | Role |
 |------|------|
-| [`test.py`](test.py) | Batch runs `TEST_CASES` with `train_placement(..., verbose=False)` and aggregates timing and normalized metrics. |
+| [`test.py`](test.py) | Batch runs `TEST_CASES` with `train_placement(..., verbose=False)`; prints per-test metrics and an **aggregate** block (average overlap, average normalized wirelength, total runtime) plus a one-line summary at the end. |
 | [`tune_optuna.py`](tune_optuna.py) | Hyperparameter search (external to core library API). |
 | [`README.md`](README.md) | Challenge statement and leaderboard. |
 
