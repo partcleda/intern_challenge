@@ -594,6 +594,8 @@ def calculate_normalized_metrics(cell_features, pin_features, edge_list):
             - num_cells_with_overlaps: number of unique cells involved in overlaps
             - total_cells: total number of cells
             - num_nets: number of nets (edges)
+            - core area: area of the core region
+            - core utilization: (std cell + macro area) / core area
     """
     N = cell_features.shape[0]
 
@@ -601,6 +603,22 @@ def calculate_normalized_metrics(cell_features, pin_features, edge_list):
     cells_with_overlaps = calculate_cells_with_overlaps(cell_features)
     num_cells_with_overlaps = len(cells_with_overlaps)
     overlap_ratio = num_cells_with_overlaps / N if N > 0 else 0.0
+
+    # Calculate core area: max bounding box containing all cells
+    positions = cell_features[:, [CellFeatureIdx.X, CellFeatureIdx.Y]]
+    widths = cell_features[:, CellFeatureIdx.WIDTH]
+    heights = cell_features[:, CellFeatureIdx.HEIGHT]
+    
+    min_x = (positions[:, 0] - widths/2).min().item()
+    max_x = (positions[:, 0] + widths/2).max().item() 
+    min_y = (positions[:, 1] - heights/2).min().item()
+    max_y = (positions[:, 1] + heights/2).max().item()
+    
+    core_area = (max_x - min_x) * (max_y - min_y)
+
+    # Calculate core utilization: (std cell + macro area) / core area
+    std_macro_area = cell_features[:, CellFeatureIdx.AREA].sum().item()
+    core_utilization = (std_macro_area) / core_area if core_area > 0 and overlap_ratio == 0.0 else float('nan')
 
     # Calculate wirelength metric: (wirelength / num nets) / sqrt(total area)
     if edge_list.shape[0] == 0:
@@ -626,6 +644,8 @@ def calculate_normalized_metrics(cell_features, pin_features, edge_list):
         "num_cells_with_overlaps": num_cells_with_overlaps,
         "total_cells": N,
         "num_nets": num_nets,
+        "core_area": core_area,
+        "core_utilization": core_utilization,
     }
 
 
@@ -690,11 +710,34 @@ def plot_placement(
             )
 
             # Set axis limits with margin
-            all_x = positions[:, 0]
-            all_y = positions[:, 1]
+            all_x_max = positions[:, 0] + widths/2
+            all_y_max = positions[:, 1] + heights/2
+            all_x_min = positions[:, 0] - widths/2
+            all_y_min = positions[:, 1] - heights/2
             margin = 10
-            ax.set_xlim(all_x.min() - margin, all_x.max() + margin)
-            ax.set_ylim(all_y.min() - margin, all_y.max() + margin)
+            ax.set_xlim(all_x_min.min() - margin, all_x_max.max() + margin)
+            ax.set_ylim(all_y_min.min() - margin, all_y_max.max() + margin)
+
+            # Draw bounding box around all cells
+            bbox_width = all_x_max.max() - all_x_min.min()
+            bbox_height = all_y_max.max() - all_y_min.min()
+            bbox_rect = Rectangle(
+                (all_x_min.min(), all_y_min.min()),
+                bbox_width,
+                bbox_height,
+                fill=False,
+                edgecolor='red',
+                linestyle='--',
+                linewidth=1
+            )
+            ax.add_patch(bbox_rect)
+            
+            # Add dimensions text
+            ax.text(all_x_min.min(), all_y_max.max() + 1,
+                    f'({bbox_width:.1f}x{bbox_height:.1f}) = {bbox_width * bbox_height:.1f}',
+                    horizontalalignment='left',
+                    verticalalignment='bottom',
+                    color='red')
 
         plt.tight_layout()
         output_path = os.path.join(OUTPUT_DIR, filename)
@@ -785,6 +828,9 @@ def main():
     print(f"Overlap Ratio: {normalized_metrics['overlap_ratio']:.4f} "
           f"({normalized_metrics['num_cells_with_overlaps']}/{normalized_metrics['total_cells']} cells)")
     print(f"Normalized Wirelength: {normalized_metrics['normalized_wl']:.4f}")
+    print(f"Core Area: {normalized_metrics['core_area']:.2f}")
+    core_utilization = normalized_metrics['core_utilization'] if normalized_metrics['core_utilization'] < 1.0 else float('nan')
+    print(f"Core Utilization: {core_utilization:.2f}")
 
     # Success check
     print("\n" + "=" * 70)
