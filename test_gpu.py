@@ -22,6 +22,10 @@ import time
 
 import torch
 
+# Added by me for GPU access
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using device: {DEVICE}")
+
 # Import from the challenge file
 from placement import (
     calculate_normalized_metrics,
@@ -45,11 +49,10 @@ TEST_CASES = [
     (8, 7, 150, 1008),
     (9, 8, 200, 1009),
     (10, 10, 2000, 1010),
-    # Realistic designs (Killed in cpu)
-    # (11, 10, 10000, 1011),
-    # (12, 10, 100000, 1012),
+    # Realistic designs
+    (11, 10, 10000, 1011),
+    # (12, 10, 100000, 1012), (Exceeding GPU memory limit)
 ]
-
 
 def run_placement_test(
     test_id,
@@ -70,22 +73,32 @@ def run_placement_test(
     Returns:
         Dictionary with test results and metrics
     """
-    if seed:
+    if seed is not None:
         # Set seed for reproducibility
         torch.manual_seed(seed)
+        if torch.cuda.is_available(): torch.cuda.manual_seed_all(seed)
 
     # Generate netlist
     cell_features, pin_features, edge_list = generate_placement_input(
         num_macros, num_std_cells
     )
 
+    # For GPU 
+    cell_features = cell_features.to(DEVICE)
+    pin_features = pin_features.to(DEVICE)
+    edge_list = edge_list.to(DEVICE)
+
     # Initialize positions with random spread
     total_cells = cell_features.shape[0]
     total_area = cell_features[:, 0].sum().item()
     spread_radius = (total_area ** 0.5) * 0.6
 
-    angles = torch.rand(total_cells) * 2 * 3.14159
-    radii = torch.rand(total_cells) * spread_radius
+    # angles = torch.rand(total_cells) * 2 * 3.14159
+    # radii = torch.rand(total_cells) * spread_radius
+
+    # For GPU
+    angles = torch.rand(total_cells, device=DEVICE) * 2 * 3.14159
+    radii = torch.rand(total_cells, device=DEVICE) * spread_radius
 
     cell_features[:, 2] = radii * torch.cos(angles)
     cell_features[:, 3] = radii * torch.sin(angles)
@@ -100,9 +113,17 @@ def run_placement_test(
     )
     elapsed_time = time.time() - start_time
 
-    # Calculate final metrics using shared implementation
-    final_cell_features = result["final_cell_features"]
-    metrics = calculate_normalized_metrics(final_cell_features, pin_features, edge_list)
+    # # Calculate final metrics using shared implementation
+    # final_cell_features = result["final_cell_features"]
+    # metrics = calculate_normalized_metrics(final_cell_features, pin_features, edge_list)
+
+    # For GPU
+    final_cell_features = result["final_cell_features"].detach().cpu()
+    metrics = calculate_normalized_metrics(
+        final_cell_features,
+        pin_features.detach().cpu(),
+        edge_list.detach().cpu(),
+    )
 
     return {
         "test_id": test_id,
@@ -193,3 +214,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

@@ -1,0 +1,6 @@
+# Default/CPU install. For GPU, install torch separately:
+# pip install torch --index-url https://download.pytorch.org/whl/cu124
+torch>=2.1.0,<3.0
+numpy>=1.26.0
+scipy>=1.11.0
+matplotlib>=3.8.0
