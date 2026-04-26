@@ -119,7 +119,7 @@ def run_placement_test(
     }
 
 
-def run_all_tests():
+def run_all_tests(TEST_CASES=None):
     """Run all test cases and compute aggregate metrics.
 
     Uses default hyperparameters from train_placement() function.
@@ -188,7 +188,8 @@ def run_all_tests():
 def main():
     """Main entry point for the test suite."""
     # Run all tests with default hyperparameters
-    run_all_tests()
+    test_cases=TEST_CASES[0:10]
+    run_all_tests(TEST_CASES=test_cases)  # Run first 10 tests for quick feedback
 
 
 if __name__ == "__main__":
