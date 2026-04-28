@@ -1,0 +1,10 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "placement-cpp",
+  "version-string": "0.1.0",
+  "dependencies": [
+    "cli11",
+    "matplotlib-cpp",
+    "sqlite3"
+  ]
+}

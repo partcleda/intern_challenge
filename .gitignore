@@ -3,5 +3,25 @@
 *.jpeg
 *.gif
 *.bmp
+*.csv
 
+
+*/.ipynb_checkpoints/*
+profile/*
+torch_profile/*
+loss_history/*
+loss_tracking/*
 **/__pycache__/**
+temp.txt
+
+# Plan files
+*[Pp][Ll][Aa][Nn]*.md
+
+# C++ build and vcpkg manifest artifacts
+cpp/build/
+cpp/build-xcode/
+cpp/build-coverage/
+cpp/vcpkg_installed/
+cpp/.vcpkg-root
+
+
