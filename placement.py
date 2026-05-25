@@ -40,9 +40,13 @@ BONUS CHALLENGES:
 
 import os
 from enum import IntEnum
+import math
 
 import torch
+from numba import njit
+import numpy as np
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
 
 
 # Feature index enums for cleaner code access
@@ -296,8 +300,392 @@ def wirelength_attraction_loss(cell_features, pin_features, edge_list):
     # Total wirelength
     total_wirelength = torch.sum(smooth_manhattan)
 
-    return total_wirelength / edge_list.shape[0]  # Normalize by number of edges
+    return total_wirelength / edge_list.shape[0]  # Normalize y_key number of edges
 
+
+"""
+Multi-Radii Spatial Grid implementation for overlap loss calculation
+
+Uses a hash based on cell posistions to find cells that are close to each other.
+Using this hash, quickly find cell pairs that most likely overlap. Then calculate
+overlap loss using those pairs.
+
+Implementation is fast compared to brute force implementation when relatively few cells are overlapping.
+
+Uses numba functions to compile python code for building the grid and finding
+the relavent cell pairs that are close to each other, speeding up the implementation.
+"""
+ 
+@njit(cache=True)
+def _build_grid(pos, bin_size):
+    
+    """
+    Builds spatial grid hash map for calculating which cells are close to each other and likely to overlap
+    Spatial grid is stored using a flat array to improve speed.
+    
+    Input: 
+        pos : array giving positions of cell centers
+        bin_size : size of the bin radius (Determines how close cells should be to be considered in the same bin)
+
+    Output:
+        
+        cell_key_sort_ind : Index array to sort cells by their key in the spatial grid.
+        bin_start : An array telling the starting index of each bin in cell_key_sort_ind (an array which sorts cells by their key). 
+            Lets us quickly check which cells are in the same bin.
+
+        keys : All keys in spatial grid
+        STRIDE: Large number used so that we can calculate keys from x, y positions of the cells.
+            key = x_key * STRIDE + y_key (similar to calculating an elements position in a flattened 2-d array
+                using its row and column)
+            Used because we are storing spatial grid in 1-D array, so this prevents incorrect bin collisions
+            (Cells that are far from each other shouldn't show up in the same bin)
+    """
+
+    # Calculate key in spatial grid for each cell
+
+    N = pos.shape[0]
+    STRIDE = np.int64(1 << 20)
+    cell_to_key = np.empty(N, dtype=np.int64)
+    for i in range(N):
+        x_key = np.int64(np.floor(pos[i, 0] / bin_size)) + np.int64(1 << 19)
+        y_key = np.int64(np.floor(pos[i, 1] / bin_size)) + np.int64(1 << 19)
+        cell_to_key[i] = x_key * STRIDE + y_key
+ 
+
+    # Sort cells (and their keys) by their key values
+
+    cell_key_sort_ind = np.argsort(cell_to_key)
+    sort_cell_to_key = cell_to_key[cell_key_sort_ind]
+ 
+    # Calculate number of bins by finding number of unique key values
+    num_bins = np.int64(1)
+    for i in range(1, N):
+        if sort_cell_to_key[i] != sort_cell_to_key[i - 1]:
+            num_bins += 1
+ 
+    keys = np.empty(num_bins, dtype=np.int64)
+    bin_start = np.empty(num_bins + 1, dtype=np.int64)
+    bin_start[0] = 0
+    keys[0] = sort_cell_to_key[0]
+    b = np.int64(0)
+
+    # Find all unique keys, and calculate bin_start by finding all bin separating indices
+    #   in cell_key_sort_ind
+
+    for i in range(1, N):
+        if sort_cell_to_key[i] != sort_cell_to_key[i - 1]:
+            b += 1
+            bin_start[b] = i
+            keys[b] = sort_cell_to_key[i]
+    bin_start[num_bins] = N
+ 
+    return cell_key_sort_ind, bin_start, keys, STRIDE
+ 
+ 
+@njit(cache=True)
+def _find_bin(keys, search_key):
+
+    """
+    A binary search algorthim that finds the position of search_key within
+    the keys array (which has the keys of the spatial grid)
+    """
+
+    low, high = np.int64(0), np.int64(len(keys))
+    while low < high:
+        mid = (low + high) >> np.int64(1)
+        if keys[mid] < search_key:
+            low = mid + np.int64(1)
+        else:
+            high = mid
+    if low < len(keys) and keys[low] == search_key:
+        return low
+    return np.int64(-1)
+ 
+ 
+ 
+@njit(cache=True)
+def _pairs_within_grid(cell_key_sort_ind, bin_start, keys, STRIDE,
+                       cell_indices, buf_size):
+    """
+    Calculates pairs of overlapping cells using a built spatial grid.
+    Pairs calculated are unique, so no double counting will occur.
+
+    Input:
+        cell_key_sort_ind : Index array to sort cells by their key in the spatial grid.
+        bin_start : An array telling the starting index of each bin in cell_key_sort_ind (an array which sorts cells by their key). 
+            Lets us quickly find cells in the same bin.
+
+        keys : All keys in spatial grid
+        STRIDE: Large number used so that we can calculate keys from x, y positions of the cells.
+            key = x_key * STRIDE + y_key (similar to calculating an elements position in a flattened 2-d array
+                using its row and column)
+            Used because we are storing spatial grid in 1-D array, so this prevents incorrect bin collisions
+            (Cells that are far from each other shouldn't show up in the same bin)
+
+        cell_indices : Indices of the cells in the original data array.
+        buf_size : Initial size of the arrays used to store the output overlapping pairs.
+            (Will be increased in the function if needed)
+        
+    Output:
+        src_buf: Array storing first half of all overlap pairs in the spatial grid.
+        dst_buf: Array storing second half of all overlap pairs in the spatial grid.
+
+    The bin_size is set somewhat larger than required to ensure overlapping cell pairs are found.
+    As a result, some cell pairs may not be overlapping. These pairs will just have
+    zero overlap though, so it won't affect the final overlap loss calculation
+    """
+    num_bins = len(keys)
+    src_buf = np.empty(buf_size, dtype=np.int64)
+    dst_buf = np.empty(buf_size, dtype=np.int64)
+    n       = np.int64(0)
+ 
+    for b in range(num_bins):
+
+        # Extract each bin
+
+        key_b   = keys[b]
+        x_key      = key_b // STRIDE
+        y_key      = key_b  % STRIDE
+        i_start = bin_start[b]
+        i_end   = bin_start[b + 1]
+ 
+        
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+
+                # Find neighboring bins by position
+
+                nb_key = (x_key + np.int64(dx)) * STRIDE + (y_key + np.int64(dy))
+                nb_b   = _find_bin(keys, nb_key)
+                if nb_b < 0:
+                    continue
+                j_start = bin_start[nb_b]
+                j_end   = bin_start[nb_b + 1]
+ 
+                # Find cells in current bin and neighboring bins
+                # Then extract all cell pairs in these bins.
+                #  (Neighboring bins are considered to handle edge cases where overlapping cells are
+                #   on the borders of 2 bins)
+                for ii in range(i_start, i_end):
+                    ci = cell_indices[cell_key_sort_ind[ii]]
+                    for jj in range(j_start, j_end):
+                        cj = cell_indices[cell_key_sort_ind[jj]]
+
+                        # This check ensures each cell pair is only checked once
+                        if cj > ci:
+                            if n >= buf_size:
+                                new_s       = np.empty(buf_size * 2, dtype=np.int64)
+                                new_d       = np.empty(buf_size * 2, dtype=np.int64)
+                                new_s[:n]   = src_buf[:n]
+                                new_d[:n]   = dst_buf[:n]
+                                src_buf     = new_s
+                                dst_buf     = new_d
+                                buf_size   *= 2
+                            src_buf[n] = ci
+                            dst_buf[n] = cj
+                            n += 1
+ 
+    return src_buf[:n], dst_buf[:n]
+ 
+ 
+@njit(cache=True)
+def _pairs_cross_exact(pos_small, dims_small, ids_small,
+                       pos_large, dims_large, ids_large,
+                       cell_key_sort_ind_large, bin_start_large, keys_large, STRIDE_large, bin_size_large,
+                       buf_size, safety):
+    
+    """
+    Calculates pairs of overlapping cells between a group of small cells and a group of large cells.
+    Since separate spatial grids are used for the large and small cell groups. An overlap check
+    between the small and large cells using the large cell spatial grid is necessary to get total overlap.
+
+    Input:
+        pos_small: positions of small cell group.
+        dims_small: width and height of small cell group
+        ids_small: indices of cells in the small cell group in the original data array.
+
+
+        pos_large: positions of large cell group.
+        dims_large: width and height of large cell group
+        ids_large: indices of cells in the large cell group in the original data array.
+
+        cell_key_sort_ind)large : Index array to sort large cells by their key in the large cell spatial grid.
+        bin_start_large : An array telling the starting index of each bin in 
+            cell_key_sort_ind_large (an array which sorts cells by their key). Lets us quickly find cells in the same bin.
+
+        keys_large : All keys in the large cell spatial grid
+        STRIDE_large : Large number used so that we can calculate keys from x, y positions of the cells for the large spatial grid.
+            key = x_key * STRIDE + y_key (similar to calculating an elements position in a flattened 2-d array
+                using its row and column)
+            Used because we are storing spatial grid in 1-D array, so this prevents incorrect bin collisions
+            (Cells that are far from each other shouldn't show up in the same bin)
+
+        bin_size_large : radius of large spatial grid used to determine the size of the bins in the grid.
+
+        buf_size : Initial size of the arrays used to store the output overlapping pairs.
+            (Will be increased in the function if needed)
+            
+        safety : A multiplier used in the overlap check calculation between small and large cell pairs
+                Makes overlap condition looser, so more pairs are considered. This makes sure that all overlaps
+                are found. (Even if non overlapping pairs are found, their overlap value will just be zero anyway,
+                so it won't affect the results)
+
+            overlap check calculation:
+                |xi - xj| < (wi + wj) / 2 * safety
+                |yi - yj| < (hi + hj) / 2 * safety
+        
+    Output:
+        src_buf: Array storing first half of all overlap pairs in the spatial grid.
+        dst_buf: Array storing second half of all overlap pairs in the spatial grid.
+
+    This check can be done in relatively linear time, because there are far fewer larger cells than small cells
+    in general.
+    """
+    
+    N_small     = len(ids_small)
+    src_buf = np.empty(buf_size, dtype=np.int64)
+    dst_buf = np.empty(buf_size, dtype=np.int64)
+    n       = np.int64(0)
+ 
+    for si in range(N_small):
+
+        # Get cell information for the small cells
+
+        px = pos_small[si, 0]
+        py = pos_small[si, 1]
+        wi = dims_small[si, 0]
+        hi = dims_small[si, 1]
+        ci = ids_small[si]
+ 
+        x_key = np.int64(np.floor(px / bin_size_large)) + np.int64(1 << 19)
+        y_key = np.int64(np.floor(py / bin_size_large)) + np.int64(1 << 19)
+ 
+        for dx in range(-1, 2):
+            for dy in range(-1, 2):
+
+                # Find bins in large spatial grid that neighbor the small cell.
+
+                nb_key = (x_key + np.int64(dx)) * STRIDE_large + (y_key + np.int64(dy))
+                nb_b   = _find_bin(keys_large, nb_key)
+                if nb_b < 0:
+                    continue
+ 
+                j_start = bin_start_large[nb_b]
+                j_end   = bin_start_large[nb_b + 1]
+ 
+                for jj in range(j_start, j_end):
+                    lj = cell_key_sort_ind_large[jj]          
+                    cj = ids_large[lj]        
+ 
+                    # Check if small cells potentially overlap with each large cell in neighboring bin
+                    # If it's impossible ignore this cell pair
+
+                    sep_x = (wi + dims_large[lj, 0]) / 2.0 * safety
+                    sep_y = (hi + dims_large[lj, 1]) / 2.0 * safety
+                    if (abs(px - pos_large[lj, 0]) >= sep_x or
+                            abs(py - pos_large[lj, 1]) >= sep_y):
+                        continue            
+ 
+                    # Save relevant small-large cell pairs
+                    
+                    a  = ci if ci < cj else cj
+                    b_ = cj if ci < cj else ci
+                    if n >= buf_size:
+                        new_s       = np.empty(buf_size * 2, dtype=np.int64)
+                        new_d       = np.empty(buf_size * 2, dtype=np.int64)
+                        new_s[:n]   = src_buf[:n]
+                        new_d[:n]   = dst_buf[:n]
+                        src_buf     = new_s
+                        dst_buf     = new_d
+                        buf_size   *= 2
+                    src_buf[n] = a
+                    dst_buf[n] = b_
+                    n += 1
+ 
+    return src_buf[:n], dst_buf[:n]
+ 
+ 
+ 
+def multi_radius_pairs(pos_np, dims_np, large_threshold=None, safety=1.5):
+    """
+    Calculate all potential overlapping cell pairs using spatial grid analysis.
+    2 separate grids are used for small and large cells. This reduces the likelihood
+    of false positive overlaps being detected as we won't need to use a large radius for the 
+    several significantly smaller cells. As a result, overlap calculation will be faster.
+ 
+    bin_size uses median(max_dim) per group so outlier macros don't result in a large radius
+    used for the spatial grid, which would reduce convergence time.
+ 
+    Input:
+        pos_np: Numpy array storing all cell positions
+        dims_np: Numpy array storing all cell widths and heights
+        large_threshold: Threshold of cell dimension size (max(width, height)), used to determine if a cell is
+                         large or small.
+        safety: multiplier on spatial grid bin radius. This helps ensure overlapping pairs will be found (no false negatives)
+ 
+    Output:
+        src_buf: Array storing first half of all overlap pairs in the spatial grid.
+        dst_buf: Array storing second half of all overlap pairs in the spatial grid.
+    """
+
+    # Split cells into large and small cell groups using dimension size
+
+    max_dims = dims_np.max(axis=1)
+
+    if large_threshold is None:
+        large_threshold = float(np.percentile(max_dims, 85))
+ 
+    ids_small = np.where(max_dims <= large_threshold)[0].astype(np.int64)
+    ids_large = np.where(max_dims >  large_threshold)[0].astype(np.int64)
+ 
+    pos_small  = pos_np[ids_small]
+    dims_small = dims_np[ids_small]
+    pos_large  = pos_np[ids_large]
+    dims_large = dims_np[ids_large]
+ 
+    # Use median of group dims for bin_size of each spatial grid — immune to outliers.
+    def _bin_size(d):
+        return safety * float(np.median(d.max(axis=1))) * 2.0 if len(d) > 0 else 1.0
+ 
+    bs_small = _bin_size(dims_small) if len(ids_small) > 1 else 1.0
+    bs_large = _bin_size(dims_large) if len(ids_large) > 0 else 1.0
+ 
+    all_src, all_dst = [], []
+ 
+    # Calculate potential overlap pairs for small x small cells
+    if len(ids_small) > 1:
+        order_small, bin_start_small, keys_small, STRIDE_small = _build_grid(
+            pos_small.astype(np.float64), bs_small)
+        s, d = _pairs_within_grid(
+            order_small, bin_start_small, keys_small, STRIDE_small,
+            ids_small, max(16 * len(ids_small), 64))
+        all_src.append(s); all_dst.append(d)
+ 
+    # Calculate potential overlap pairs for large x large cells
+    if len(ids_large) > 1:
+        cell_key_sort_ind_large, bin_start_large, keys_large, STRIDE_large = _build_grid(
+            pos_large.astype(np.float64), bs_large)
+        s, d = _pairs_within_grid(
+            cell_key_sort_ind_large, bin_start_large, keys_large, STRIDE_large,
+            ids_large, max(16 * len(ids_large), 64))
+        all_src.append(s); all_dst.append(d)
+ 
+    # Calculate potential overlap pairs for small x large cells
+    if len(ids_small) > 0 and len(ids_large) > 0:
+        cell_key_sort_ind_large, bin_start_large, keys_large, STRIDE_large = _build_grid(
+            pos_large.astype(np.float64), bs_large)
+        s, d = _pairs_cross_exact(
+            pos_small, dims_small, ids_small,
+            pos_large, dims_large, ids_large,
+            cell_key_sort_ind_large, bin_start_large, keys_large, STRIDE_large, bs_large,
+            max(16 * len(ids_small), 64), safety)
+        all_src.append(s); all_dst.append(d)
+ 
+    if not all_src:
+        return np.empty(0, dtype=np.int64), np.empty(0, dtype=np.int64)
+
+    return np.concatenate(all_src), np.concatenate(all_dst)
+ 
 
 def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     """Calculate loss to prevent cell overlaps.
@@ -356,18 +744,57 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     #
     # Delete this placeholder and add your implementation:
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+
+    # calculate cell positions and dimensions (widths and heights)
+    pos  = cell_features[:, 2:4]
+    dims = cell_features[:, 4:6]
+ 
+    # create numpy arrays corresponding to the cell positions and heights
+    # Note: we do not need the gradients generated from operations used to 
+    #  calculate potential overlap pairs with spatial grid analysis, only the gradients
+    #  from the overlap calculations of said pairs. Therefore, we can perform
+    #  spatial grid analysis with numpy operations instead of pytorch operations.
+    with torch.no_grad():
+        pos_np  = pos.detach().cpu().numpy().astype(np.float64)
+        dims_np = dims.detach().cpu().numpy().astype(np.float64)
+ 
+
+    # Find all overlapping pairs using spatial grid analysis
+    large_threshold = None
+    safety_margin = 1.5
+
+    src_np, dst_np = multi_radius_pairs(
+        pos_np, dims_np,
+        large_threshold=large_threshold,
+        safety=safety_margin,
+    )
+ 
+    # no cell overlapping pairs found
+    if src_np.size == 0:
+        return torch.tensor(0.0, requires_grad=True)
+ 
+
+    # calculate overlap for each cell pair found using formula described in the problem statement
+    src = torch.from_numpy(src_np)
+    dst = torch.from_numpy(dst_np)
+ 
+    dist = (pos[src] - pos[dst]).abs()
+    sep  = (dims[src] + dims[dst]) / 2.0
+    ov   = torch.relu(sep - dist)
+    area = ov[:, 0] * ov[:, 1]
+ 
+    # Normalize overlap loss using number of cells
+    return area.sum() / N
 
 
 def train_placement(
     cell_features,
     pin_features,
     edge_list,
-    num_epochs=1000,
-    lr=0.01,
-    lambda_wirelength=1.0,
-    lambda_overlap=10.0,
+    num_epochs=7000,
+    lr=0.11,
+    lambda_wirelength=5.0,
+    lambda_overlap=1.0,
     verbose=True,
     log_interval=100,
 ):
@@ -390,6 +817,9 @@ def train_placement(
             - initial_cell_features: Original cell positions (for comparison)
             - loss_history: Loss values over time
     """
+
+    torch.set_num_threads(6)
+
     # Clone features and create learnable positions
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
@@ -401,12 +831,21 @@ def train_placement(
     # Create optimizer
     optimizer = optim.Adam([cell_positions], lr=lr)
 
+    # Create learning rate scheduler to reach a strong loss minima
+    lr_schedule = CosineAnnealingWarmRestarts(optimizer, int(num_epochs/4))
+
     # Track loss history
     loss_history = {
         "total_loss": [],
         "wirelength_loss": [],
         "overlap_loss": [],
     }
+
+    # Calculate lambda ovelap using number of cell_features, this makes so that when overlap is small
+    # but nonzero, optimizer will continue reducing overlap to zero.
+
+    lambda_wirelength = 1.0
+    lambda_overlap = cell_features.size(0) / 2.0
 
     # Training loop
     for epoch in range(num_epochs):
@@ -417,6 +856,7 @@ def train_placement(
         cell_features_current[:, 2:4] = cell_positions
 
         # Calculate losses
+
         wl_loss = wirelength_attraction_loss(
             cell_features_current, pin_features, edge_list
         )
@@ -433,8 +873,9 @@ def train_placement(
         # Gradient clipping to prevent extreme updates
         torch.nn.utils.clip_grad_norm_([cell_positions], max_norm=5.0)
 
-        # Update positions
+        # Update positions and learning rate
         optimizer.step()
+        lr_schedule.step()
 
         # Record losses
         loss_history["total_loss"].append(total_loss.item())
@@ -447,6 +888,18 @@ def train_placement(
             print(f"  Total Loss: {total_loss.item():.6f}")
             print(f"  Wirelength Loss: {wl_loss.item():.6f}")
             print(f"  Overlap Loss: {overlap_loss.item():.6f}")
+
+
+        # Temporarily increase wirelength loss parameter to promote lower wirelength value in optimization
+        if epoch == 500:
+            lambda_wirelength = 100.0
+            lambda_overlap = 1.0
+
+        # Calculate lambda ovelap using number of cell_features, this makes so that when overlap is small
+        # but nonzero, optimizer will continue reducing overlap to zero.
+        if epoch == 1000:
+            lambda_wirelength = 1.0
+            lambda_overlap = cell_features.size(0)
 
     # Create final cell features
     final_cell_features = cell_features.clone()
@@ -731,13 +1184,48 @@ def main():
     )
 
     # Initialize positions with random spread to reduce initial overlaps
-    total_cells = cell_features.shape[0]
-    spread_radius = 30.0
-    angles = torch.rand(total_cells) * 2 * 3.14159
-    radii = torch.rand(total_cells) * spread_radius
+    #total_cells = cell_features.shape[0]
+    #spread_radius = 30.0
+    #angles = torch.rand(total_cells) * 2 * 3.14159
+    #radii = torch.rand(total_cells) * spread_radius
 
-    cell_features[:, 2] = radii * torch.cos(angles)
-    cell_features[:, 3] = radii * torch.sin(angles)
+    #cell_features[:, 2] = radii * torch.cos(angles)
+    #cell_features[:, 3] = radii * torch.sin(angles)
+
+    # Initialize cells by evenly spreading them out based on max dimension size and number of cells
+    # Cells are placed around in a square pattern
+
+    N = cell_features.shape[0]
+    sqrt_N = math.ceil(math.sqrt(N))
+
+    max_width = cell_features[:, 4].max().item()
+    max_height = cell_features[:, 5].max().item()
+
+    x_pos = 0.0
+    y_pos= 0.0
+
+    col_counter = 0
+
+    x_init = []
+    y_init = []
+
+    for i in range(N):
+        if col_counter > sqrt_N:
+            col_counter = 0
+            x_pos = 0.0
+            y_pos += max_height/40
+
+        x_init.append(x_pos)
+        y_init.append(y_pos)
+
+        x_pos += max_width/40
+        col_counter += 1
+
+    x_init = torch.tensor(x_init)
+    y_init = torch.tensor(y_init)
+
+    cell_features[:, CellFeatureIdx.X] = x_init
+    cell_features[:, CellFeatureIdx.Y] = y_init
 
     # Calculate initial metrics
     print("\n" + "=" * 70)
