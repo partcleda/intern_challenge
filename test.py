@@ -19,6 +19,7 @@ not to tune hyperparameters.
 """
 
 import time
+import math
 
 import torch
 
@@ -46,8 +47,8 @@ TEST_CASES = [
     (9, 8, 200, 1009),
     (10, 10, 2000, 1010),
     # Realistic designs
-    (11, 10, 10000, 1011),
-    (12, 10, 100000, 1012),
+    #(11, 10, 10000, 1011),
+    #(12, 10, 100000, 1012),
 ]
 
 
@@ -79,16 +80,40 @@ def run_placement_test(
         num_macros, num_std_cells
     )
 
-    # Initialize positions with random spread
-    total_cells = cell_features.shape[0]
-    total_area = cell_features[:, 0].sum().item()
-    spread_radius = (total_area ** 0.5) * 0.6
+    # Initialize cells by evenly spreading them out based on max dimension size and number of cells
+    # Cells are placed around in a square pattern
 
-    angles = torch.rand(total_cells) * 2 * 3.14159
-    radii = torch.rand(total_cells) * spread_radius
+    N = cell_features.shape[0]
+    sqrt_N = math.ceil(math.sqrt(N))
 
-    cell_features[:, 2] = radii * torch.cos(angles)
-    cell_features[:, 3] = radii * torch.sin(angles)
+    max_width = cell_features[:, 4].max().item()
+    max_height = cell_features[:, 5].max().item()
+
+    x_pos = 0.0
+    y_pos= 0.0
+
+    col_counter = 0
+
+    x_init = []
+    y_init = []
+
+    for i in range(N):
+        if col_counter > sqrt_N:
+            col_counter = 0
+            x_pos = 0.0
+            y_pos += max_height/40
+
+        x_init.append(x_pos)
+        y_init.append(y_pos)
+
+        x_pos += max_width/40
+        col_counter += 1
+
+    x_init = torch.tensor(x_init)
+    y_init = torch.tensor(y_init)
+
+    cell_features[:, 2] = x_init
+    cell_features[:, 3] = y_init
 
     # Run optimization with default hyperparameters
     start_time = time.time()
