@@ -44,6 +44,11 @@ from enum import IntEnum
 import torch
 import torch.optim as optim
 
+try:
+    import cpp_placer  # C++20 placer; builds itself on import
+except Exception:  # pragma: no cover - falls back to the PyTorch path
+    cpp_placer = None
+
 
 # Feature index enums for cleaner code access
 class CellFeatureIdx(IntEnum):
@@ -347,17 +352,30 @@ def overlap_repulsion_loss(cell_features, pin_features, edge_list):
     if N <= 1:
         return torch.tensor(0.0, requires_grad=True)
 
-    # TODO: Implement overlap detection and loss calculation here
-    #
-    # Your implementation should:
-    # 1. Extract cell positions, widths, and heights
-    # 2. Compute pairwise overlaps using vectorized operations
-    # 3. Return a scalar loss that is zero when no overlaps exist
-    #
-    # Delete this placeholder and add your implementation:
+    positions = cell_features[:, 2:4]
+    widths = cell_features[:, 4]
+    heights = cell_features[:, 5]
 
-    # Placeholder - returns a constant loss (REPLACE THIS!)
-    return torch.tensor(1.0, requires_grad=True)
+    # Pairwise centre-to-centre separation.
+    dx = (positions[:, 0].unsqueeze(1) - positions[:, 0].unsqueeze(0)).abs()
+    dy = (positions[:, 1].unsqueeze(1) - positions[:, 1].unsqueeze(0)).abs()
+
+    # Minimum separation for two axis-aligned rectangles not to overlap.
+    min_sep_x = 0.5 * (widths.unsqueeze(1) + widths.unsqueeze(0))
+    min_sep_y = 0.5 * (heights.unsqueeze(1) + heights.unsqueeze(0))
+
+    # Positive penetration depth per axis; zero once the pair is separated, so
+    # the loss is exactly zero on a legal placement.
+    overlap_x = torch.relu(min_sep_x - dx)
+    overlap_y = torch.relu(min_sep_y - dy)
+
+    # Overlap requires penetration in BOTH axes, so the product is the overlap
+    # area and is zero if either axis is clear. Count each pair once.
+    overlap_area = torch.triu(overlap_x * overlap_y, diagonal=1)
+
+    # Normalising by N (not N^2) keeps the gradient magnitude per cell roughly
+    # scale-free, so one lambda_overlap works across design sizes.
+    return overlap_area.sum() / N
 
 
 def train_placement(
@@ -389,7 +407,36 @@ def train_placement(
             - final_cell_features: Optimized cell positions
             - initial_cell_features: Original cell positions (for comparison)
             - loss_history: Loss values over time
+
+    Backend selection (env var PARTCL_SOLVER):
+        "cpp"   (default) - the C++20 placer in cpp_placer/. Global analytic
+                            placement -> macro legalization -> row legalization
+                            -> detailed placement, multi-start under a time
+                            budget (env PARTCL_BUDGET, seconds per design).
+        "torch"           - the original Adam loop below, now driven by the
+                            overlap_repulsion_loss() implemented above. Kept as
+                            the reference so the two can be compared directly.
     """
+    if os.environ.get("PARTCL_SOLVER", "cpp").lower() == "cpp" and cpp_placer is not None:
+        # Search budget in seconds. Large designs get proportionally more: they
+        # have the most white space to squeeze and the fewest restarts per second.
+        base = float(os.environ.get("PARTCL_BUDGET", "3.0"))
+        n_cells = int(cell_features.shape[0])
+        budget = base * (3.0 if n_cells > 1000 else 1.0)
+        x, y = cpp_placer.place(
+            cell_features,
+            pin_features,
+            edge_list,
+            budget_s=budget,
+            seed=12345,
+            verbose=verbose,
+        )
+        return {
+            "final_cell_features": cpp_placer.to_features(cell_features, x, y),
+            "initial_cell_features": cell_features.clone(),
+            "loss_history": {"total_loss": [], "wirelength_loss": [], "overlap_loss": []},
+        }
+
     # Clone features and create learnable positions
     cell_features = cell_features.clone()
     initial_cell_features = cell_features.clone()
